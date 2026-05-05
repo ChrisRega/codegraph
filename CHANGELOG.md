@@ -8,6 +8,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Markdown-shaped MCP tools** for LLM-friendly output:
+  - `cypher_md` — same as `cypher` but renders rows as a GitHub-flavoured
+    Markdown table.
+  - `node_md` — compact Markdown dossier for a single node (properties
+    plus incoming/outgoing neighbours grouped by edge type, plus any
+    attached `:Note`s).
+  - `history` — list `:GitCommit` snapshots recorded in the graph.
+- **`:Note` nodes** as long-lived annotations attached to any graph node
+  via the new `write_note` and `list_notes` MCP tools. Notes survive
+  `--full` reindex and surface automatically inside `node_md`.
+- **Real revision history.** The indexer no longer wipes `:GitCommit` /
+  `:Author` on `--full`. First-time / full runs backfill up to the last
+  200 commits reachable from `HEAD`; incremental runs walk only the
+  commits between the previously indexed `HEAD` and the new one. The
+  full DAG is materialised as `(:GitCommit)-[:PARENT_OF]->(:GitCommit)`.
+- **`first_seen_commit` / `last_seen_commit`** properties on `:File` and
+  `:Function`, updated on every index pass.
+- **Claude skill** (`examples/claude-skill/codegraph.md`) and
+  repo-level `CLAUDE.md` instructing Claude Code to prefer the MCP
+  graph for navigation and to persist findings as `:Note`s.
+
+### Changed
+
+- Full reindex wipe set is now `{File, Workspace, Package, APIEndpoint,
+  APIType}`. Revision history (`:GitCommit`, `:Author`, `:Note`) is
+  intentionally preserved.
+
 - Initial workspace skeleton with three crates (`codegraph-core`,
   `codegraph-indexer`, `codegraph-mcp`) on top of [velr](https://crates.io/crates/velr).
 - `codegraph-core`: thin velr adapter exposing `Db`, owned `Cell` / `Table`

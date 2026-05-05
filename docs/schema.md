@@ -15,8 +15,10 @@ and your own openCypher queries can expect to find in a populated database.
                           :Package ─[:EXPOSES]─→ :APIEndpoint | :APIType
 :File      ←[:DEFINED_IN]─ :Function | :Symbol | :Field | :Parameter | :Import
 :Function  ─[:CALLS]─→ :Function
-:GitCommit ─[:SNAPSHOT_OF]─→ :Workspace
+:GitCommit ─[:SNAPSHOT_OF]─→ :Workspace      (only the current HEAD)
+:GitCommit ─[:PARENT_OF]─→ :GitCommit         (full revision DAG)
 :Author    ─[:AUTHORED]─→ :GitCommit
+:Note      ─[:NOTES]─→ <any node>             (free-form Markdown notes)
 :Doc       ─[:HAS_SECTION]─→ :DocSection
 :DocSection ─[:MENTIONS]─→ :Function | :Symbol
 :DocSection ─[:LINKS_TO]─→ :File | :Doc
@@ -56,6 +58,8 @@ A Cargo crate, npm package, or Python project.
 | `name` | string | basename |
 | `extension` | string | (opt) |
 | `lines` | int | line count when LSP indexed |
+| `first_seen_commit` | string | (opt) — full SHA of the first indexed commit that contained this file |
+| `last_seen_commit` | string | (opt) — full SHA of the most recent indexed commit that touched this file |
 
 ### `:Function`
 
@@ -68,6 +72,8 @@ A Cargo crate, npm package, or Python project.
 | `body` | string | source slice, may be empty |
 | `step_kind` | string | (opt) — when `kind = 'Step'`: `Given` \| `When` \| `Then` |
 | `step_regex` | string | (opt) — when `kind = 'Step'` |
+| `first_seen_commit` | string | (opt) — first indexed commit that defined this function |
+| `last_seen_commit` | string | (opt) — most recent indexed commit |
 
 ### `:Symbol`
 
@@ -83,15 +89,44 @@ them in.
 
 ### `:GitCommit`, `:Author`
 
-Captured from `git log -1` at index time.
+A real revision history. The first time a repo is indexed (or whenever
+`--full` is passed) the indexer backfills up to `HISTORY_BACKFILL_LIMIT`
+(currently 200) commits reachable from `HEAD`. Incremental runs walk
+only the commits between the previously indexed `HEAD` and the new
+`HEAD`. Both `:GitCommit` and `:Author` survive `--full` reindexes —
+they are not part of the wipe set.
 
 | property | type | notes |
 | --- | --- | --- |
-| `:GitCommit.hash` | string | full SHA |
+| `:GitCommit.hash` | string | full SHA — primary key |
 | `:GitCommit.short_hash` | string | first 7 chars |
 | `:GitCommit.message` | string | first line of the commit |
 | `:GitCommit.timestamp` | string | author-date ISO-8601 |
 | `:Author.email`, `:Author.name` | string | as recorded by git |
+
+Edges:
+
+- `(:Author)-[:AUTHORED]->(:GitCommit)`
+- `(:GitCommit)-[:PARENT_OF]->(:GitCommit)` — the full DAG, including
+  merges (a merge commit appears as the target of multiple `PARENT_OF`
+  edges).
+- `(:GitCommit)-[:SNAPSHOT_OF]->(:Workspace)` — only the current `HEAD`.
+
+### `:Note`
+
+Free-form Markdown notes written by humans or LLM agents via the
+`write_note` MCP tool. Survives `--full` reindex.
+
+| property | type | notes |
+| --- | --- | --- |
+| `id` | string | timestamp-derived primary key |
+| `title` | string | (opt) |
+| `author` | string | defaults to `claude` from the MCP tool |
+| `tags` | string | comma-separated, (opt) |
+| `created_at` | string | ISO-8601 |
+| `markdown` | string | the body |
+
+Edges: `(:Note)-[:NOTES]->(<any target>)`.
 
 ### `:Doc`, `:DocSection`
 
@@ -141,8 +176,10 @@ OpenAPI operations / GraphQL SDL types / Protobuf RPCs and messages.
 | `DEPENDS_ON` | Package → Package | property `kind`: `Normal`, `Dev`, `Build` |
 | `DEFINED_IN` | Function/Symbol/etc. → File | reverse direction matters: `(:File)<-[:DEFINED_IN]-(n)` |
 | `CALLS` | Function → Function | rebuilt every run from LSP `outgoingCalls` |
-| `SNAPSHOT_OF` | GitCommit → Workspace | one per indexed commit |
+| `SNAPSHOT_OF` | GitCommit → Workspace | only on the current HEAD |
+| `PARENT_OF` | GitCommit → GitCommit | full revision DAG, including merges |
 | `AUTHORED` | Author → GitCommit | |
+| `NOTES` | Note → any | written via the `write_note` MCP tool |
 | `HAS_SECTION` | Doc → DocSection | |
 | `MENTIONS` | DocSection → Function/Symbol | resolved code-spans |
 | `LINKS_TO` | DocSection → File | resolved `[text](path)` links |

@@ -153,9 +153,6 @@ fn main() {
     let head_hash = git_head_hash(&workspace);
     let head_short = head_hash.chars().take(7).collect::<String>();
     let head_message = git_head_message(&workspace);
-    let head_author_name = git_field(&workspace, "%an");
-    let head_author_email = git_field(&workspace, "%ae");
-    let head_timestamp = git_field(&workspace, "%aI");
 
     if !head_hash.is_empty() {
         eprintln!(
@@ -202,17 +199,13 @@ fn main() {
     // On a full reindex wipe everything the indexer owns, in addition to the
     // per-pass wipes that happen later (BDD / Markdown / code nodes). Without
     // this, re-running --full on top of an old DB stacks duplicate Workspace /
-    // Package / GitCommit / Author / API* nodes via the MERGE statements.
+    // Package / API* nodes via the MERGE statements.
+    //
+    // `:GitCommit`, `:Author` and `:Note` are intentionally excluded — they
+    // form the persistent revision history and user-attached annotations,
+    // and are kept across reindexes so we accumulate a real timeline.
     if is_full {
-        for label in [
-            "File",
-            "Workspace",
-            "Package",
-            "GitCommit",
-            "Author",
-            "APIEndpoint",
-            "APIType",
-        ] {
+        for label in ["File", "Workspace", "Package", "APIEndpoint", "APIType"] {
             run(&db, &format!("MATCH (n:{label}) DETACH DELETE n"));
         }
     }
@@ -391,40 +384,107 @@ fn main() {
         );
     }
 
-    // ── Phase 5: GitCommit + Author nodes ────────────────────────────────────
+    // ── Phase 5: GitCommit + Author history ──────────────────────────────────
+    //
+    // Strategy:
+    //   * On a full reindex (or first-ever run) we backfill the last
+    //     `HISTORY_BACKFILL_LIMIT` commits reachable from HEAD.
+    //   * On an incremental run we walk only the commits between the
+    //     previously indexed HEAD and the new HEAD.
+    // Each commit becomes a `:GitCommit`, linked to its `:Author`, the
+    // `:Workspace`, and to its parents via `:PARENT_OF`. Re-using `MERGE`
+    // makes the operation idempotent across runs.
     if !head_hash.is_empty() {
-        run(
-            &db,
-            &format!(
-                "MERGE (a:Author {{email: {}}}) SET a.name = {}",
-                escape_str(&head_author_email),
-                escape_str(&head_author_name),
-            ),
+        let range = match (&last_indexed_hash, is_full) {
+            (Some(prev), false) if prev != &head_hash => format!("{prev}..HEAD"),
+            _ => format!("-n {HISTORY_BACKFILL_LIMIT}"),
+        };
+        let commits = git_log_range(&workspace, &range);
+        eprintln!(
+            "  [+] History: recording {} commit{} in graph",
+            commits.len(),
+            if commits.len() == 1 { "" } else { "s" }
         );
+        for c in &commits {
+            run(
+                &db,
+                &format!(
+                    "MERGE (a:Author {{email: {}}}) SET a.name = {}",
+                    escape_str(&c.author_email),
+                    escape_str(&c.author_name),
+                ),
+            );
+            run(
+                &db,
+                &format!(
+                    "MERGE (c:GitCommit {{hash: {}}}) \
+                     SET c.short_hash = {}, c.message = {}, c.timestamp = {}",
+                    escape_str(&c.hash),
+                    escape_str(&c.short_hash),
+                    escape_str(&c.message),
+                    escape_str(&c.timestamp),
+                ),
+            );
+            run(
+                &db,
+                &format!(
+                    "MATCH (a:Author {{email: {}}}), (c:GitCommit {{hash: {}}}) \
+                     MERGE (a)-[:AUTHORED]->(c)",
+                    escape_str(&c.author_email),
+                    escape_str(&c.hash),
+                ),
+            );
+            for parent in &c.parents {
+                // We may not have inserted the parent yet; create a stub.
+                run(
+                    &db,
+                    &format!("MERGE (:GitCommit {{hash: {}}})", escape_str(parent),),
+                );
+                run(
+                    &db,
+                    &format!(
+                        "MATCH (p:GitCommit {{hash: {}}}), (c:GitCommit {{hash: {}}}) \
+                         MERGE (p)-[:PARENT_OF]->(c)",
+                        escape_str(parent),
+                        escape_str(&c.hash),
+                    ),
+                );
+            }
+        }
+        // HEAD ↔ Workspace pointer: keep a single SNAPSHOT_OF on the head.
         run(
             &db,
             &format!(
-                "MERGE (c:GitCommit {{hash: {}}}) SET c.short_hash = {}, c.message = {}, c.timestamp = {}",
-                escape_str(&head_hash),
-                escape_str(&head_short),
-                escape_str(&head_message),
-                escape_str(&head_timestamp),
-            ),
-        );
-        run(
-            &db,
-            &format!(
-                "MATCH (a:Author {{email: {}}}), (c:GitCommit {{hash: {}}}) CREATE (a)-[:AUTHORED]->(c)",
-                escape_str(&head_author_email),
-                escape_str(&head_hash),
-            ),
-        );
-        run(
-            &db,
-            &format!(
-                "MATCH (c:GitCommit {{hash: {}}}), (w:Workspace {{name: {}}}) CREATE (c)-[:SNAPSHOT_OF]->(w)",
+                "MATCH (c:GitCommit {{hash: {}}}), (w:Workspace {{name: {}}}) \
+                 MERGE (c)-[:SNAPSHOT_OF]->(w)",
                 escape_str(&head_hash),
                 escape_str(&ws_name),
+            ),
+        );
+
+        // first_seen / last_seen tagging on Files and Functions.
+        // last_seen is updated unconditionally; first_seen is only set if absent.
+        let head_lit = escape_str(&head_hash);
+        run(
+            &db,
+            &format!("MATCH (f:File) SET f.last_seen_commit = {head_lit}"),
+        );
+        run(
+            &db,
+            &format!(
+                "MATCH (f:File) WHERE f.first_seen_commit IS NULL \
+                 SET f.first_seen_commit = {head_lit}"
+            ),
+        );
+        run(
+            &db,
+            &format!("MATCH (f:Function) SET f.last_seen_commit = {head_lit}"),
+        );
+        run(
+            &db,
+            &format!(
+                "MATCH (f:Function) WHERE f.first_seen_commit IS NULL \
+                 SET f.first_seen_commit = {head_lit}"
             ),
         );
     }
@@ -452,19 +512,71 @@ fn main() {
 
 // ── Git helpers ──────────────────────────────────────────────────────────────
 
+/// How many commits to backfill into the graph the first time we index a
+/// repository (or on `--full`). Bounds the work; later incremental runs only
+/// add commits between the previous and current HEAD.
+const HISTORY_BACKFILL_LIMIT: usize = 200;
+
+#[derive(Debug, Clone)]
+struct CommitRecord {
+    hash: String,
+    short_hash: String,
+    message: String,
+    timestamp: String,
+    author_name: String,
+    author_email: String,
+    parents: Vec<String>,
+}
+
+/// Walk the given git revision range and parse one `CommitRecord` per commit.
+///
+/// `range` is appended verbatim to the `git log` invocation, so it can be
+/// either `"-n 50"` for the first N commits reachable from HEAD or
+/// `"<prev>..HEAD"` for an incremental delta.
+fn git_log_range(workspace: &Path, range: &str) -> Vec<CommitRecord> {
+    // Custom format with a record separator so we can split reliably even when
+    // commit messages contain embedded newlines.
+    const RS: &str = "<<<CGREC>>>";
+    const FS: &str = "<<<CGFLD>>>";
+    let format = format!("--pretty=format:{RS}%H{FS}%h{FS}%P{FS}%an{FS}%ae{FS}%aI{FS}%s");
+    let mut args: Vec<String> = vec!["log".into(), format];
+    for tok in range.split_whitespace() {
+        args.push(tok.to_string());
+    }
+    let arg_refs: Vec<&str> = std::iter::once("git")
+        .chain(args.iter().map(String::as_str))
+        .collect();
+    let raw = cmd_output(workspace, &arg_refs);
+    let mut out = Vec::new();
+    for chunk in raw.split(RS) {
+        let trimmed = chunk.trim_start_matches('\n').trim_end();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = trimmed.splitn(7, FS).collect();
+        if parts.len() < 7 {
+            continue;
+        }
+        let parents: Vec<String> = parts[2].split_whitespace().map(|s| s.to_string()).collect();
+        out.push(CommitRecord {
+            hash: parts[0].to_string(),
+            short_hash: parts[1].to_string(),
+            parents,
+            author_name: parts[3].to_string(),
+            author_email: parts[4].to_string(),
+            timestamp: parts[5].to_string(),
+            message: parts[6].to_string(),
+        });
+    }
+    out
+}
+
 fn git_head_hash(workspace: &Path) -> String {
     cmd_output(workspace, &["git", "rev-parse", "HEAD"])
 }
 
 fn git_head_message(workspace: &Path) -> String {
     cmd_output(workspace, &["git", "log", "-1", "--format=%s"])
-}
-
-fn git_field(workspace: &Path, format: &str) -> String {
-    cmd_output(
-        workspace,
-        &["git", "log", "-1", &format!("--format={format}")],
-    )
 }
 
 fn git_changed_files(workspace: &Path, since_hash: &str) -> Vec<String> {
@@ -1329,4 +1441,52 @@ fn emit_python_dep(db: &Db, pkg_name: &str, dep_name: &str, kind: &str) {
             k = escape_str(kind),
         ),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a tiny throw-away git repo with two commits and verify the
+    /// log-range parser returns both, with parents wired up.
+    #[test]
+    fn git_log_range_parses_commits_and_parents() {
+        let tmp =
+            std::env::temp_dir().join(format!("codegraph-history-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(&tmp)
+                .output()
+                .unwrap()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "Test"]);
+        std::fs::write(tmp.join("a.txt"), "1").unwrap();
+        git(&["add", "a.txt"]);
+        git(&["commit", "-q", "-m", "first"]);
+        std::fs::write(tmp.join("a.txt"), "2").unwrap();
+        git(&["add", "a.txt"]);
+        git(&["commit", "-q", "-m", "second"]);
+
+        let commits = git_log_range(&tmp, "-n 10");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        assert_eq!(commits.len(), 2, "got: {commits:#?}");
+        // Newest first.
+        assert_eq!(commits[0].message, "second");
+        assert_eq!(commits[1].message, "first");
+        // Second commit has the first as its parent.
+        assert_eq!(commits[0].parents, vec![commits[1].hash.clone()]);
+        // Initial commit has no parent.
+        assert!(commits[1].parents.is_empty());
+        for c in &commits {
+            assert_eq!(c.author_email, "test@example.com");
+            assert!(!c.short_hash.is_empty() && c.short_hash.len() < c.hash.len());
+        }
+    }
 }

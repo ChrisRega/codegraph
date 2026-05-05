@@ -55,14 +55,81 @@ queries it dropped.
 
 ## `explain`
 
-Returns velr's planner trace for a query. velr 0.2.x's `ExplainTrace`
-type doesn't yet implement `Display`, so this currently returns a stub
-acknowledging the trace was produced. Will be wired up properly when
-velr exposes a printable plan.
+Returns velr's planner trace for a query, fetched as the result tables of
+`EXPLAIN <query>` via `Db::query_many`.
 
 | arg | type | notes |
 | --- | --- | --- |
 | `query` | string, required | |
+
+## `cypher_md`
+
+Same as `cypher`, but renders the result as a GitHub-flavoured Markdown
+table instead of TSV. Pipes inside cells are escaped, embedded
+newlines/tabs collapsed to spaces. Prefer this whenever you want the
+rows to drop directly into a doc, note, or chat reply.
+
+| arg | type | notes |
+| --- | --- | --- |
+| `query` | string, required | |
+
+## `node_md`
+
+Returns a compact Markdown dossier for a single node identified by a
+property lookup: properties (as JSON), outgoing edges grouped by edge
+type, incoming edges grouped by edge type, and any attached `:Note`s.
+
+| arg | type | notes |
+| --- | --- | --- |
+| `label` | string, required | bare identifier, e.g. `Function`, `File` |
+| `key`   | string, required | bare identifier of the property to match on |
+| `value` | string, required | property value (currently always passed as text) |
+| `neighbours_limit` | integer, optional | per-edge cap, default `25` |
+
+Both `label` and `key` are validated against `^[A-Za-z_][A-Za-z0-9_]*$`
+because they're inlined into the query — invalid input is rejected.
+
+## `write_note`
+
+Attaches a Markdown `:Note` node to one or more existing nodes selected
+by a Cypher `MATCH`. Use this to persist findings, design notes,
+gotchas — anything you'd otherwise lose at end of session. Future
+`node_md` calls on the target surface the notes automatically.
+
+| arg | type | notes |
+| --- | --- | --- |
+| `match` | string, required | Cypher `MATCH` clause that binds variable `t` |
+| `markdown` | string, required | note body |
+| `title` | string, optional | one-line title |
+| `author` | string, optional | defaults to `claude` |
+| `tags` | string, optional | comma-separated tags |
+
+If the `MATCH` binds zero targets, the note is **not** persisted —
+`write_note` returns `isError: true` and cleans up the orphan. This
+prevents accumulating ghost notes from typo'd MATCH clauses.
+
+`:Note` nodes survive a `--full` reindex (they're part of the persistent
+revision/annotation history, not the regenerated source-derived graph).
+
+## `list_notes`
+
+Lists `:Note` nodes as Markdown, newest first. Without arguments it
+returns every note. With a `match` clause that binds `t`, only notes
+attached to a matched target are returned.
+
+| arg | type | notes |
+| --- | --- | --- |
+| `match` | string, optional | Cypher MATCH binding `t` |
+| `limit` | integer, optional | default `50` |
+
+## `history`
+
+Lists `:GitCommit` snapshots recorded in the graph, newest first, joined
+to their `:Author` via the `[:AUTHORED]` edge.
+
+| arg | type | notes |
+| --- | --- | --- |
+| `limit` | integer, optional | default `50` |
 
 ## Auto-reopen behaviour
 

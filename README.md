@@ -97,6 +97,47 @@ The indexer requires an LSP for the chosen language to be on `$PATH`:
 
 Override the binary with `--lsp <path>`.
 
+## Using codegraph from Claude Code
+
+The MCP server exposes Markdown-shaped tools designed to drop straight
+into an LLM reply, plus a `:Note` mechanism for persisting findings:
+
+| tool | purpose |
+| --- | --- |
+| `schema` | enumerate labels and edge types — call first |
+| `cypher` / `cypher_md` | run a Cypher query (TSV / Markdown table) |
+| `node_md` | full dossier of a node (props + neighbours + notes) |
+| `write_note` | attach a Markdown `:Note` to any node |
+| `list_notes` | list notes (optionally filtered to a subgraph) |
+| `history` | walk `:GitCommit` snapshots stored in the graph |
+| `begin` / `write` / `commit` / `rollback` | buffered transactions |
+| `explain` | velr planner trace |
+
+A Claude skill that wires these tools into Claude Code's default
+behaviour ("prefer the graph over `grep`/`find`, persist findings as
+notes") ships at
+[`examples/claude-skill/codegraph.md`](examples/claude-skill/codegraph.md).
+Copy it to `~/.claude/skills/codegraph.md` (user-wide) or
+`.claude/skills/codegraph.md` (per project).
+
+## Revision history in the graph
+
+`codegraph-indexer` records git history as it indexes. The first run on
+a repository (or any `--full` rebuild) backfills up to
+`HISTORY_BACKFILL_LIMIT` (default 200) commits reachable from `HEAD`;
+incremental runs walk only the commits between the previously indexed
+`HEAD` and the new one. The full DAG is materialised:
+
+```
+(:Author)-[:AUTHORED]->(:GitCommit)-[:PARENT_OF]->(:GitCommit)
+                       (:GitCommit)-[:SNAPSHOT_OF]->(:Workspace)   -- HEAD only
+```
+
+`:File` and `:Function` carry `first_seen_commit` / `last_seen_commit`
+properties, updated on every indexer pass. `:GitCommit`, `:Author` and
+user-written `:Note` nodes survive `--full` reindex — the wipe set is
+limited to source-derived labels.
+
 ## Development
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md). Outstanding work is tracked

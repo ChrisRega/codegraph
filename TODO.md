@@ -79,6 +79,25 @@ Strike through (`~~text~~`) when done.
   materialising the JSON intermediate (only worth doing if the dataset
   grows past a point where the JSON round-trip matters).
 
+## G. LLM-facing usability (added post-release-readiness)
+
+- [x] **G1** — Markdown-shaped MCP tools: `cypher_md`, `node_md`,
+  `history`. All output GFM tables / Markdown dossiers ready to drop
+  into a chat reply. Tested in `crates/codegraph-mcp/src/main.rs`.
+- [x] **G2** — `:Note` persistence layer with `write_note` /
+  `list_notes` MCP tools. Notes are attached via `(:Note)-[:NOTES]->(t)`,
+  rejected when the MATCH binds zero targets, and survive `--full`
+  reindex.
+- [x] **G3** — Real revision history: `:GitCommit` + `:Author` no longer
+  wiped on `--full`. First run backfills up to 200 commits; incremental
+  runs walk only the new range. Full DAG via `:PARENT_OF`. `:File` and
+  `:Function` get `first_seen_commit` / `last_seen_commit`. Parser is
+  unit-tested against a temp repo.
+- [x] **G4** — Claude skill at `examples/claude-skill/codegraph.md`
+  plus repo-level `CLAUDE.md` instructing Claude Code to prefer
+  `codegraph` MCP tools over `grep`/`find` and to persist findings as
+  notes.
+
 ## What's left
 
 The remaining open items are:
@@ -89,5 +108,5 @@ The remaining open items are:
 - **F2** / **F3** — pure nice-to-haves, not blockers.
 
 Everything else is done. `cargo build --workspace`,
-`cargo test --workspace`, `cargo fmt --all -- --check` and
+`cargo test --workspace` (37 tests), `cargo fmt --all -- --check` and
 `cargo clippy --workspace --all-targets -- -D warnings` all pass.
