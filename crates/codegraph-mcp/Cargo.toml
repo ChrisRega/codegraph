@@ -1,0 +1,20 @@
+[package]
+name = "codegraph-mcp"
+description = "MCP server exposing a velr-backed codegraph database as Claude tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "codegraph-mcp"
+path = "src/main.rs"
+
+[dependencies]
+codegraph-core = { path = "../codegraph-core" }
+velr        = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+uuid        = { workspace = true }
+anyhow      = { workspace = true }

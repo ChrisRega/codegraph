@@ -1,0 +1,9 @@
+/target
+**/*.rs.bk
+Cargo.lock.bak
+*.db
+*.db-shm
+*.db-wal
+.idea/
+.vscode/
+.DS_Store
