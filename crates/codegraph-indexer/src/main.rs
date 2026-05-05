@@ -96,8 +96,35 @@ impl ProjectKind {
     }
 }
 
+const HELP: &str = "\
+codegraph-indexer — projects a codebase into a velr graph database
+
+USAGE:
+    codegraph-indexer [OPTIONS]
+
+OPTIONS:
+    --workspace <path>   Project root to index (default: .)
+    --db        <path>   velr database file to write to (default: code-graph.db)
+    --lsp       <bin>    Override the language-server binary
+    --full               Force a full re-index (ignore the sidecar metadata)
+    -h, --help           Show this help and exit
+    -V, --version        Print version and exit
+
+The first run on a fresh DB does a full index; subsequent runs use git diff
+between the last-indexed commit (recorded in <db>.codegraph-meta.json) and
+HEAD to re-parse only changed files.
+";
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "-h" || a == "--help") {
+        println!("{HELP}");
+        return;
+    }
+    if args.iter().any(|a| a == "-V" || a == "--version") {
+        println!("codegraph-indexer {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
     let workspace_path = flag(&args, "--workspace").unwrap_or_else(|| ".".to_string());
     let db_path = flag(&args, "--db").unwrap_or_else(|| "code-graph.db".to_string());
     let force_full = args.iter().any(|a| a == "--full");
@@ -144,7 +171,10 @@ fn main() {
     let last_indexed_hash = if force_full {
         None
     } else {
-        prev_meta.as_ref().map(|m| m.last_commit.clone()).filter(|s| !s.is_empty())
+        prev_meta
+            .as_ref()
+            .map(|m| m.last_commit.clone())
+            .filter(|s| !s.is_empty())
     };
 
     let (changed_files, is_full) = match (&last_indexed_hash, head_hash.is_empty()) {
@@ -168,6 +198,24 @@ fn main() {
             (Vec::new(), true)
         }
     };
+
+    // On a full reindex wipe everything the indexer owns, in addition to the
+    // per-pass wipes that happen later (BDD / Markdown / code nodes). Without
+    // this, re-running --full on top of an old DB stacks duplicate Workspace /
+    // Package / GitCommit / Author / API* nodes via the MERGE statements.
+    if is_full {
+        for label in [
+            "File",
+            "Workspace",
+            "Package",
+            "GitCommit",
+            "Author",
+            "APIEndpoint",
+            "APIType",
+        ] {
+            run(&db, &format!("MATCH (n:{label}) DETACH DELETE n"));
+        }
+    }
 
     // ── Phase 1: Workspace + Package nodes ───────────────────────────────────
     let ws_name = workspace
@@ -247,7 +295,9 @@ fn main() {
 
         let exts = kind.extensions();
         for changed_file in &changed_files {
-            if exts.iter().any(|e| changed_file.ends_with(&format!(".{e}")))
+            if exts
+                .iter()
+                .any(|e| changed_file.ends_with(&format!(".{e}")))
                 && !rs_files.iter().any(|(_, rel, _)| rel == changed_file)
             {
                 let p = escape_str(changed_file);
@@ -261,7 +311,10 @@ fn main() {
                         "MATCH (f:File {{path: {p}}})-[:HAS_IMPORT]->(i:Import) DETACH DELETE i"
                     ),
                 );
-                run(&db, &format!("MATCH (f:File {{path: {p}}}) DETACH DELETE f"));
+                run(
+                    &db,
+                    &format!("MATCH (f:File {{path: {p}}}) DETACH DELETE f"),
+                );
                 eprintln!("  [-] Deleted: {}", changed_file);
             }
         }
@@ -269,7 +322,10 @@ fn main() {
         to_reindex
     };
 
-    eprintln!("  [*] Indexing {} files via LSP ({lsp_cmd})...", files_to_index.len());
+    eprintln!(
+        "  [*] Indexing {} files via LSP ({lsp_cmd})...",
+        files_to_index.len()
+    );
 
     // ── Phase 3+4: Index files and build call graph via LSP ──────────────────
     let lsp_args = kind.lsp_args();
@@ -405,7 +461,10 @@ fn git_head_message(workspace: &Path) -> String {
 }
 
 fn git_field(workspace: &Path, format: &str) -> String {
-    cmd_output(workspace, &["git", "log", "-1", &format!("--format={format}")])
+    cmd_output(
+        workspace,
+        &["git", "log", "-1", &format!("--format={format}")],
+    )
 }
 
 fn git_changed_files(workspace: &Path, since_hash: &str) -> Vec<String> {
@@ -413,7 +472,11 @@ fn git_changed_files(workspace: &Path, since_hash: &str) -> Vec<String> {
         workspace,
         &["git", "diff", "--name-only", &format!("{since_hash}..HEAD")],
     );
-    output.lines().map(|l| l.to_string()).filter(|l| !l.is_empty()).collect()
+    output
+        .lines()
+        .map(|l| l.to_string())
+        .filter(|l| !l.is_empty())
+        .collect()
 }
 
 fn cmd_output(dir: &Path, args: &[&str]) -> String {
@@ -428,7 +491,10 @@ fn cmd_output(dir: &Path, args: &[&str]) -> String {
 /// Lightweight ISO-8601 timestamp without pulling in `chrono`.
 fn chrono_now_iso() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     format!("{}Z", iso_from_unix(secs))
 }
 
@@ -480,12 +546,20 @@ fn index_feature_files(
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
         .filter(|e| {
-            e.path().extension().and_then(|s| s.to_str()).map(|s| s == "feature").unwrap_or(false)
+            e.path()
+                .extension()
+                .and_then(|s| s.to_str())
+                .map(|s| s == "feature")
+                .unwrap_or(false)
         })
         .filter(|e| !e.path().components().any(|c| c.as_os_str() == "target"))
         .map(|e| {
             let abs = e.path().to_path_buf();
-            let rel = abs.strip_prefix(workspace).unwrap_or(&abs).to_string_lossy().to_string();
+            let rel = abs
+                .strip_prefix(workspace)
+                .unwrap_or(&abs)
+                .to_string_lossy()
+                .to_string();
             (abs, rel)
         })
         .collect();
@@ -513,7 +587,10 @@ fn index_feature_files(
             run(db, &format!(
                 "MATCH (f:Feature {{file_path: {p}}})-[:HAS_SCENARIO]->(sc:Scenario) DETACH DELETE sc"
             ));
-            run(db, &format!("MATCH (f:Feature {{file_path: {p}}}) DETACH DELETE f"));
+            run(
+                db,
+                &format!("MATCH (f:Feature {{file_path: {p}}}) DETACH DELETE f"),
+            );
         }
         touched
     };
@@ -532,7 +609,12 @@ fn index_feature_files(
 
         for item in items {
             match item {
-                gherkin::FeatureItem::Feature { name, file_path, line, tags } => {
+                gherkin::FeatureItem::Feature {
+                    name,
+                    file_path,
+                    line,
+                    tags,
+                } => {
                     let feature_qn = format!("{file_path}::{name}");
                     run(
                         db,
@@ -548,8 +630,16 @@ fn index_feature_files(
                     current_scenario_qn = None;
                     features += 1;
                 }
-                gherkin::FeatureItem::Scenario { feature_name: _, name, line, tags, id: _ } => {
-                    let Some(ref f_qn) = current_feature_qn else { continue };
+                gherkin::FeatureItem::Scenario {
+                    feature_name: _,
+                    name,
+                    line,
+                    tags,
+                    id: _,
+                } => {
+                    let Some(ref f_qn) = current_feature_qn else {
+                        continue;
+                    };
                     let scenario_qn = format!("{f_qn}::{name}@{line}");
                     run(
                         db,
@@ -571,8 +661,16 @@ fn index_feature_files(
                     current_scenario_qn = Some(scenario_qn);
                     scenarios += 1;
                 }
-                gherkin::FeatureItem::Step { scenario_id: _, order, kind, text, line } => {
-                    let Some(ref sc_qn) = current_scenario_qn else { continue };
+                gherkin::FeatureItem::Step {
+                    scenario_id: _,
+                    order,
+                    kind,
+                    text,
+                    line,
+                } => {
+                    let Some(ref sc_qn) = current_scenario_qn else {
+                        continue;
+                    };
                     let step_qn = format!("{sc_qn}#{order}");
                     run(
                         db,
@@ -611,8 +709,12 @@ fn index_feature_files(
         .query("MATCH (fn:Function) WHERE fn.kind = 'Step' RETURN fn.qualified_name AS qn, fn.step_regex AS sr, fn.step_kind AS sk")
         .ok();
 
-    let Some(step_t) = step_table else { return (features, scenarios, steps, 0) };
-    let Some(fn_t) = fn_table else { return (features, scenarios, steps, 0) };
+    let Some(step_t) = step_table else {
+        return (features, scenarios, steps, 0);
+    };
+    let Some(fn_t) = fn_table else {
+        return (features, scenarios, steps, 0);
+    };
 
     let step_tuples = string_triples(&step_t, "qn", "text", "kind");
     let fn_tuples = string_triples(&fn_t, "qn", "sr", "sk");
@@ -655,7 +757,9 @@ fn promote_step_impls(db: &Db, workspace: &Path) -> usize {
     let mut promoted = 0usize;
     for rel_path in test_files {
         let abs = workspace.join(&rel_path);
-        let Ok(source) = std::fs::read_to_string(&abs) else { continue };
+        let Ok(source) = std::fs::read_to_string(&abs) else {
+            continue;
+        };
         for impl_ in bdd_steps::extract_step_impls_from_file(&source) {
             run(
                 db,
@@ -682,7 +786,9 @@ fn string_triples(
     let ai = t.col(a);
     let bi = t.col(b);
     let ci = t.col(c);
-    let (Some(ai), Some(bi), Some(ci)) = (ai, bi, ci) else { return Vec::new() };
+    let (Some(ai), Some(bi), Some(ci)) = (ai, bi, ci) else {
+        return Vec::new();
+    };
     t.rows
         .iter()
         .filter_map(|row| {
@@ -722,13 +828,33 @@ fn extract_members(ws_toml: &toml::Value, ws_root: &Path) -> Vec<PathBuf> {
 fn index_packages(db: &Db, members: &[PathBuf], workspace: &Path, ws_name: &str) {
     for member_path in members {
         let cargo_toml = member_path.join("Cargo.toml");
-        let Ok(content) = std::fs::read_to_string(&cargo_toml) else { continue };
-        let Ok(pkg_toml) = content.parse::<toml::Value>() else { continue };
+        let Ok(content) = std::fs::read_to_string(&cargo_toml) else {
+            continue;
+        };
+        let Ok(pkg_toml) = content.parse::<toml::Value>() else {
+            continue;
+        };
 
-        let name = pkg_toml.get("package").and_then(|p| p.get("name")).and_then(|n| n.as_str()).unwrap_or("unknown");
-        let version = pkg_toml.get("package").and_then(|p| p.get("version")).and_then(|v| v.as_str()).unwrap_or("0.0.0");
-        let edition = pkg_toml.get("package").and_then(|p| p.get("edition")).and_then(|v| v.as_str()).unwrap_or("2021");
-        let rel_path = member_path.strip_prefix(workspace).unwrap_or(member_path).to_string_lossy().to_string();
+        let name = pkg_toml
+            .get("package")
+            .and_then(|p| p.get("name"))
+            .and_then(|n| n.as_str())
+            .unwrap_or("unknown");
+        let version = pkg_toml
+            .get("package")
+            .and_then(|p| p.get("version"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("0.0.0");
+        let edition = pkg_toml
+            .get("package")
+            .and_then(|p| p.get("edition"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("2021");
+        let rel_path = member_path
+            .strip_prefix(workspace)
+            .unwrap_or(member_path)
+            .to_string_lossy()
+            .to_string();
 
         run(
             db,
@@ -758,7 +884,10 @@ fn index_packages(db: &Db, members: &[PathBuf], workspace: &Path, ws_name: &str)
                 };
                 for (dep_name, dep_val) in deps {
                     let is_ws = dep_val.get("path").is_some()
-                        || dep_val.get("workspace").and_then(|w| w.as_bool()).unwrap_or(false);
+                        || dep_val
+                            .get("workspace")
+                            .and_then(|w| w.as_bool())
+                            .unwrap_or(false);
                     if !is_ws {
                         run(
                             db,
@@ -814,7 +943,11 @@ fn collect_source_files(
                     .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
                     .and_then(|v| v.get("name")?.as_str().map(String::from))
                     .unwrap_or_else(|| {
-                        member_path.file_name().unwrap_or_default().to_string_lossy().to_string()
+                        member_path
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .to_string()
                     });
                 let mut dirs = vec![];
                 for d in ["src", "lib", "app", "pages", "components", "."] {
@@ -845,7 +978,11 @@ fn collect_source_files(
                             .map(String::from)
                     })
                     .unwrap_or_else(|| {
-                        member_path.file_name().unwrap_or_default().to_string_lossy().to_string()
+                        member_path
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .to_string()
                     });
                 let mut dirs = vec![];
                 for d in ["src", "lib", "app", "."] {
@@ -882,18 +1019,26 @@ fn collect_source_files(
             if !src_dir.exists() {
                 continue;
             }
-            for entry in WalkDir::new(src_dir).into_iter().filter_map(|e| e.ok()).filter(|e| {
-                let path = e.path();
-                !path.components().any(|c| {
-                    let s = c.as_os_str().to_string_lossy();
-                    skip_dirs.iter().any(|d| s.as_ref() == *d || s.ends_with(d))
-                }) && e.path().extension().is_some_and(|ext| {
-                    let ext_str = ext.to_string_lossy();
-                    extensions.iter().any(|e| *e == ext_str.as_ref())
+            for entry in WalkDir::new(src_dir)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    let path = e.path();
+                    !path.components().any(|c| {
+                        let s = c.as_os_str().to_string_lossy();
+                        skip_dirs.iter().any(|d| s.as_ref() == *d || s.ends_with(d))
+                    }) && e.path().extension().is_some_and(|ext| {
+                        let ext_str = ext.to_string_lossy();
+                        extensions.iter().any(|e| *e == ext_str.as_ref())
+                    })
                 })
-            }) {
+            {
                 let abs = entry.path().to_path_buf();
-                let rel = abs.strip_prefix(workspace).unwrap_or(&abs).to_string_lossy().to_string();
+                let rel = abs
+                    .strip_prefix(workspace)
+                    .unwrap_or(&abs)
+                    .to_string_lossy()
+                    .to_string();
                 files.push((abs, rel, pkg_name.clone()));
             }
         }
@@ -912,8 +1057,14 @@ fn index_node_packages(db: &Db, workspace: &Path, ws_name: &str) {
         return;
     };
 
-    let name = pkg.get("name").and_then(|n| n.as_str()).unwrap_or("unknown");
-    let version = pkg.get("version").and_then(|v| v.as_str()).unwrap_or("0.0.0");
+    let name = pkg
+        .get("name")
+        .and_then(|n| n.as_str())
+        .unwrap_or("unknown");
+    let version = pkg
+        .get("version")
+        .and_then(|v| v.as_str())
+        .unwrap_or("0.0.0");
 
     run(
         db,
@@ -967,20 +1118,30 @@ fn index_node_packages(db: &Db, workspace: &Path, ws_name: &str) {
                 if !base_path.is_dir() {
                     continue;
                 }
-                let Ok(entries) = std::fs::read_dir(&base_path) else { continue };
+                let Ok(entries) = std::fs::read_dir(&base_path) else {
+                    continue;
+                };
                 for entry in entries.filter_map(|e| e.ok()) {
                     let sub_pkg = entry.path().join("package.json");
                     if !sub_pkg.exists() {
                         continue;
                     }
-                    let Ok(sub_content) = std::fs::read_to_string(&sub_pkg) else { continue };
+                    let Ok(sub_content) = std::fs::read_to_string(&sub_pkg) else {
+                        continue;
+                    };
                     let Ok(sub_json): Result<serde_json::Value, _> =
                         serde_json::from_str(&sub_content)
                     else {
                         continue;
                     };
-                    let sub_name = sub_json.get("name").and_then(|n| n.as_str()).unwrap_or("unknown");
-                    let sub_version = sub_json.get("version").and_then(|v| v.as_str()).unwrap_or("0.0.0");
+                    let sub_name = sub_json
+                        .get("name")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("unknown");
+                    let sub_version = sub_json
+                        .get("version")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("0.0.0");
                     let rel_path = entry
                         .path()
                         .strip_prefix(workspace)
@@ -1021,15 +1182,27 @@ fn index_python_packages(db: &Db, workspace: &Path, ws_name: &str) {
             let name = toml
                 .get("project")
                 .and_then(|p| p.get("name"))
-                .or_else(|| toml.get("tool").and_then(|t| t.get("poetry")).and_then(|p| p.get("name")))
+                .or_else(|| {
+                    toml.get("tool")
+                        .and_then(|t| t.get("poetry"))
+                        .and_then(|p| p.get("name"))
+                })
                 .and_then(|n| n.as_str())
                 .unwrap_or_else(|| {
-                    workspace.file_name().unwrap_or_default().to_str().unwrap_or("unknown")
+                    workspace
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_str()
+                        .unwrap_or("unknown")
                 });
             let version = toml
                 .get("project")
                 .and_then(|p| p.get("version"))
-                .or_else(|| toml.get("tool").and_then(|t| t.get("poetry")).and_then(|p| p.get("version")))
+                .or_else(|| {
+                    toml.get("tool")
+                        .and_then(|t| t.get("poetry"))
+                        .and_then(|p| p.get("version"))
+                })
                 .and_then(|v| v.as_str())
                 .unwrap_or("0.0.0");
 
@@ -1050,8 +1223,10 @@ fn index_python_packages(db: &Db, workspace: &Path, ws_name: &str) {
                 ),
             );
 
-            if let Some(deps) =
-                toml.get("project").and_then(|p| p.get("dependencies")).and_then(|d| d.as_array())
+            if let Some(deps) = toml
+                .get("project")
+                .and_then(|p| p.get("dependencies"))
+                .and_then(|d| d.as_array())
             {
                 for dep in deps {
                     if let Some(dep_str) = dep.as_str() {
@@ -1097,8 +1272,11 @@ fn index_python_packages(db: &Db, workspace: &Path, ws_name: &str) {
     }
 
     if let Ok(content) = std::fs::read_to_string(&reqs_path) {
-        let name =
-            workspace.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let name = workspace
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
         run(
             db,
             &format!(

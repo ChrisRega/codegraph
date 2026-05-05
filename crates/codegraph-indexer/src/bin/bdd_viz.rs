@@ -102,28 +102,55 @@ fn main() {
     let mut packages_used: BTreeMap<String, ()> = BTreeMap::new();
 
     for (qn, (name, fp)) in feat_qns.iter().zip(feat_names.iter().zip(feat_fps.iter())) {
-        let pkg = file_to_pkg.get(fp).cloned().unwrap_or_else(|| pkg_from_path_fallback(fp));
+        let pkg = file_to_pkg
+            .get(fp)
+            .cloned()
+            .unwrap_or_else(|| pkg_from_path_fallback(fp));
         let pkg_id = format!("pkg::{pkg}");
         if !packages_used.contains_key(&pkg_id) {
             packages_used.insert(pkg_id.clone(), ());
-            push_node(&pkg_id, &pkg, "Package", Map::new(), &mut nodes, &mut seen_nodes);
+            push_node(
+                &pkg_id,
+                &pkg,
+                "Package",
+                Map::new(),
+                &mut nodes,
+                &mut seen_nodes,
+            );
         }
         let feat_id = format!("feat::{qn}");
         let mut extra = Map::new();
         extra.insert("file_path".into(), Value::String(fp.clone()));
-        push_node(&feat_id, name, "Feature", extra, &mut nodes, &mut seen_nodes);
+        push_node(
+            &feat_id,
+            name,
+            "Feature",
+            extra,
+            &mut nodes,
+            &mut seen_nodes,
+        );
         push_edge(&pkg_id, &feat_id, "HAS_FEATURE", &mut edges);
     }
 
     for (fqn, (qn, name)) in sc_fqns.iter().zip(sc_qns.iter().zip(sc_names.iter())) {
         let feat_id = format!("feat::{fqn}");
         let sc_id = format!("sc::{qn}");
-        push_node(&sc_id, name, "Scenario", Map::new(), &mut nodes, &mut seen_nodes);
+        push_node(
+            &sc_id,
+            name,
+            "Scenario",
+            Map::new(),
+            &mut nodes,
+            &mut seen_nodes,
+        );
         push_edge(&feat_id, &sc_id, "HAS_SCENARIO", &mut edges);
     }
 
-    for (((scqn, qn), kind), text) in
-        st_scqns.iter().zip(st_qns.iter()).zip(st_kinds.iter()).zip(st_texts.iter())
+    for (((scqn, qn), kind), text) in st_scqns
+        .iter()
+        .zip(st_qns.iter())
+        .zip(st_kinds.iter())
+        .zip(st_texts.iter())
     {
         let sc_id = format!("sc::{scqn}");
         let st_id = format!("st::{qn}");
@@ -146,7 +173,14 @@ fn main() {
         let fn_id = format!("fn::{fnqn}");
         let mut extra = Map::new();
         extra.insert("qualified_name".into(), Value::String(fnqn.clone()));
-        push_node(&fn_id, fnname, "Function", extra, &mut nodes, &mut seen_nodes);
+        push_node(
+            &fn_id,
+            fnname,
+            "Function",
+            extra,
+            &mut nodes,
+            &mut seen_nodes,
+        );
         push_edge(&st_id, &fn_id, "IMPLEMENTED_BY", &mut edges);
     }
 
@@ -173,13 +207,21 @@ fn flag(args: &[String], name: &str) -> Option<String> {
 fn query(db: &Db, cypher: &str) -> Table {
     db.query(cypher).unwrap_or_else(|e| {
         eprintln!("query failed: {e}\n  {cypher}");
-        Table { columns: Vec::new(), rows: Vec::new() }
+        Table {
+            columns: Vec::new(),
+            rows: Vec::new(),
+        }
     })
 }
 
 fn col_ints(t: &Table, alias: &str) -> Vec<i64> {
-    let Some(idx) = t.col(alias) else { return Vec::new() };
-    t.rows.iter().filter_map(|r| r.get(idx).and_then(|c| c.as_i64())).collect()
+    let Some(idx) = t.col(alias) else {
+        return Vec::new();
+    };
+    t.rows
+        .iter()
+        .filter_map(|r| r.get(idx).and_then(|c| c.as_i64()))
+        .collect()
 }
 
 fn pkg_from_path_fallback(path: &str) -> String {

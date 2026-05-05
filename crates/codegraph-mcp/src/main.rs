@@ -56,7 +56,11 @@ struct TxState {
 
 impl TxState {
     fn new() -> Self {
-        Self { active: false, message: None, pending: Vec::new() }
+        Self {
+            active: false,
+            message: None,
+            pending: Vec::new(),
+        }
     }
 }
 
@@ -246,7 +250,10 @@ fn handle_begin(tx: &mut TxState, params: &Value) -> Value {
         ));
     }
     tx.active = true;
-    tx.message = params.get("message").and_then(|v| v.as_str()).map(|s| s.to_string());
+    tx.message = params
+        .get("message")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
     tx.pending.clear();
     ok_text("transaction opened".to_string())
 }
@@ -311,28 +318,53 @@ fn handle_rollback(tx: &mut TxState) -> Value {
     tx.active = false;
     tx.message = None;
     tx.pending.clear();
-    ok_text(format!("rolled back ({n} buffered queries discarded, nothing was written)"))
+    ok_text(format!(
+        "rolled back ({n} buffered queries discarded, nothing was written)"
+    ))
 }
 
 fn handle_explain(db: &Db, params: &Value) -> Value {
     let Some(query) = params.get("query").and_then(|v| v.as_str()) else {
         return err_text("missing required argument: query".to_string());
     };
-    match db.velr().explain(query) {
-        // velr's ExplainTrace doesn't implement Debug or Display in 0.2.x — fall back to a
-        // confirmation message until a future velr release exposes a printable plan.
-        Ok(_plan) => ok_text(
-            "(velr returned an explain trace; pretty-printing not yet available in this driver)"
-                .to_string(),
-        ),
+    // velr's `Velr::explain` returns an `ExplainTrace` without `Display`/`Debug`,
+    // but `EXPLAIN <query>` runs as a multi-table query that we can read directly.
+    let explain_query = format!("EXPLAIN {query}");
+    match db.query_many(&explain_query) {
+        Ok(tables) => {
+            let mut buf = String::new();
+            for (i, t) in tables.iter().enumerate() {
+                if i > 0 {
+                    buf.push_str("\n---\n");
+                }
+                buf.push_str(&format_table(t));
+            }
+            if buf.is_empty() {
+                buf.push_str("(no plan returned)");
+            }
+            ok_text(buf)
+        }
         Err(e) => err_text(format!("explain error: {e}")),
     }
 }
 
 // ── DB freshness check ────────────────────────────────────────────────────────
 
+/// Best-effort mtime for the velr database. velr is SQLite-backed, so when
+/// it runs in WAL mode the main file's mtime can lag the actual last-write
+/// (writes go to `<path>-wal` first). We pick the latest of the three
+/// candidates so we don't miss an external indexer run that hasn't yet
+/// flushed its WAL.
 fn db_mtime(path: &str) -> Option<std::time::SystemTime> {
-    std::fs::metadata(path).ok().and_then(|m| m.modified().ok())
+    let candidates = [
+        path.to_string(),
+        format!("{path}-wal"),
+        format!("{path}-shm"),
+    ];
+    candidates
+        .iter()
+        .filter_map(|p| std::fs::metadata(p).ok().and_then(|m| m.modified().ok()))
+        .max()
 }
 
 fn maybe_reopen(
@@ -344,7 +376,9 @@ fn maybe_reopen(
     if !tx.pending.is_empty() {
         return;
     }
-    let Some(disk) = db_mtime(db_path) else { return };
+    let Some(disk) = db_mtime(db_path) else {
+        return;
+    };
     let stale = match last_opened {
         Some(opened) => disk > *opened,
         None => true,
@@ -366,8 +400,33 @@ fn maybe_reopen(
 
 // ── Main loop ─────────────────────────────────────────────────────────────────
 
+const HELP: &str = "\
+codegraph-mcp — MCP server exposing a velr-backed graph database to LLM agents
+
+USAGE:
+    codegraph-mcp --db <path>
+    codegraph-mcp <path>
+
+The MCP server reads JSON-RPC requests on stdin and writes responses on
+stdout. Tools advertised: schema, cypher, begin, write, commit, rollback,
+explain. See docs/mcp-tools.md for details.
+
+OPTIONS:
+    --db <path>     velr database file
+    -h, --help      Show this help and exit
+    -V, --version   Print version and exit
+";
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "-h" || a == "--help") {
+        println!("{HELP}");
+        return;
+    }
+    if args.iter().any(|a| a == "-V" || a == "--version") {
+        println!("codegraph-mcp {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
     let db_path = args
         .iter()
         .zip(args.iter().skip(1))
@@ -375,7 +434,7 @@ fn main() {
         .map(|(_, val)| val.clone())
         .or_else(|| args.iter().skip(1).find(|a| !a.starts_with("--")).cloned())
         .unwrap_or_else(|| {
-            eprintln!("Usage: codegraph-mcp --db <path>");
+            eprintln!("Usage: codegraph-mcp --db <path>\n\nRun with --help for details.");
             std::process::exit(1);
         });
 
@@ -420,7 +479,11 @@ fn main() {
             "notifications/initialized" | "notifications/cancelled" => continue,
             "tools/list" => response(&req.id, tool_list()),
             "tools/call" => {
-                let name = req.params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                let name = req
+                    .params
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 let params = req.params.get("arguments").unwrap_or(&Value::Null);
 
                 maybe_reopen(&mut db, &db_path, &mut last_opened_mtime, &tx);
@@ -443,5 +506,52 @@ fn main() {
 
         writeln!(out, "{}", serde_json::to_string(&reply).unwrap()).ok();
         out.flush().ok();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_list_advertises_expected_tools() {
+        let v = tool_list();
+        let names: Vec<&str> = v["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        for expected in [
+            "schema", "cypher", "begin", "write", "commit", "rollback", "explain",
+        ] {
+            assert!(names.contains(&expected), "missing tool: {expected}");
+        }
+    }
+
+    #[test]
+    fn format_table_renders_rows_as_tsv() {
+        let t = Table {
+            columns: vec!["name".into(), "n".into()],
+            rows: vec![
+                vec![Cell::Text("alpha".into()), Cell::Integer(1)],
+                vec![Cell::Text("beta".into()), Cell::Integer(2)],
+            ],
+        };
+        let out = format_table(&t);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], "name\tn");
+        assert!(lines[1].contains("alpha"));
+        assert!(lines[1].ends_with("\t1"));
+        assert!(lines[2].contains("beta"));
+    }
+
+    #[test]
+    fn format_table_handles_empty() {
+        let t = Table {
+            columns: vec![],
+            rows: vec![],
+        };
+        assert_eq!(format_table(&t), "(no results)");
     }
 }

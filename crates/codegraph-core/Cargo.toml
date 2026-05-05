@@ -5,7 +5,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
 rust-version.workspace = true
+readme = "../../README.md"
+documentation = "https://docs.rs/codegraph-core"
+keywords = ["graph", "cypher", "velr", "embedded", "database"]
+categories = ["database", "data-structures"]
 
 [dependencies]
 velr = { workspace = true }

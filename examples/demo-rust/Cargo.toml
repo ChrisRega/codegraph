@@ -1,0 +1,12 @@
+[package]
+name = "demo-rust"
+version = "0.1.0"
+edition = "2021"
+description = "Tiny demo project for codegraph-indexer"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+regex = "1"

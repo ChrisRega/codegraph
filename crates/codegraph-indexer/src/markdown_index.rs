@@ -42,10 +42,14 @@ pub fn index_markdown_files(
     let mut links = 0usize;
 
     for (abs, rel) in &md_files {
-        let Ok(src) = std::fs::read_to_string(abs) else { continue };
+        let Ok(src) = std::fs::read_to_string(abs) else {
+            continue;
+        };
         let parsed = parse_markdown(&src);
         let title = parsed.title.unwrap_or_else(|| {
-            abs.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| rel.clone())
+            abs.file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| rel.clone())
         });
         let line_count = src.lines().count();
         let doc_qn = rel.clone();
@@ -150,7 +154,11 @@ fn parse_markdown(src: &str) -> ParsedDoc {
                 code_block_lang = match kind {
                     CodeBlockKind::Fenced(lang) => {
                         let s = lang.to_string();
-                        if s.is_empty() { None } else { Some(s) }
+                        if s.is_empty() {
+                            None
+                        } else {
+                            Some(s)
+                        }
                     }
                     CodeBlockKind::Indented => None,
                 };
@@ -198,8 +206,10 @@ fn scan_rust_idents(text: &str) -> Vec<String> {
             .or_else(|| trimmed.strip_prefix("pub fn "))
             .or_else(|| trimmed.strip_prefix("fn "));
         if let Some(rest) = after_pub {
-            let name: String =
-                rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
             if !name.is_empty() {
                 out.push(name);
             }
@@ -260,8 +270,7 @@ fn resolve_link(
 
 fn collect_qualified_names(db: &Db) -> HashSet<String> {
     let mut out = HashSet::new();
-    if let Ok(t) =
-        db.query("MATCH (n) WHERE n:Function OR n:Symbol RETURN n.qualified_name AS qn")
+    if let Ok(t) = db.query("MATCH (n) WHERE n:Function OR n:Symbol RETURN n.qualified_name AS qn")
     {
         for s in t.column_strings("qn") {
             out.insert(s);
@@ -353,7 +362,10 @@ fn collect_markdown_files(workspace: &Path) -> Vec<(std::path::PathBuf, String)>
         })
         .filter(|e| {
             !e.path().components().any(|c| {
-                matches!(c.as_os_str().to_str(), Some("target" | "node_modules" | ".git"))
+                matches!(
+                    c.as_os_str().to_str(),
+                    Some("target" | "node_modules" | ".git")
+                )
             })
         })
         .map(|e| {

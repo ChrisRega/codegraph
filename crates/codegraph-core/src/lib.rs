@@ -46,8 +46,24 @@ impl Db {
     pub fn query(&self, cypher: &str) -> Result<Table> {
         let mut table = self.inner.exec_one(cypher)?;
         let columns: Vec<String> = table.column_names().to_vec();
-        let rows = table.collect::<Vec<Cell>, _>(|row| Ok(row.iter().map(Cell::from_ref).collect()))?;
+        let rows =
+            table.collect::<Vec<Cell>, _>(|row| Ok(row.iter().map(Cell::from_ref).collect()))?;
         Ok(Table { columns, rows })
+    }
+
+    /// Execute a query that may produce multiple result tables (e.g. semicolon-
+    /// separated statements, `EXPLAIN`). Each table is materialised into
+    /// owned `Cell` values.
+    pub fn query_many(&self, cypher: &str) -> Result<Vec<Table>> {
+        let mut stream = self.inner.exec(cypher)?;
+        let mut out = Vec::new();
+        while let Some(mut tr) = stream.next_table()? {
+            let columns: Vec<String> = tr.column_names().to_vec();
+            let rows =
+                tr.collect::<Vec<Cell>, _>(|row| Ok(row.iter().map(Cell::from_ref).collect()))?;
+            out.push(Table { columns, rows });
+        }
+        Ok(out)
     }
 }
 
@@ -71,7 +87,9 @@ impl Table {
 
     /// Convenience: collect every value of one column as `&str`, skipping non-text/null cells.
     pub fn column_strings(&self, name: &str) -> Vec<String> {
-        let Some(idx) = self.col(name) else { return vec![] };
+        let Some(idx) = self.col(name) else {
+            return vec![];
+        };
         self.rows
             .iter()
             .filter_map(|r| r.get(idx).and_then(|c| c.as_str().map(|s| s.to_string())))
@@ -207,8 +225,10 @@ pub fn escape(v: &Value) -> String {
             format!("[{}]", parts.join(", "))
         }
         Value::Map(m) => {
-            let parts: Vec<String> =
-                m.iter().map(|(k, v)| format!("{}: {}", escape_ident(k), escape(v))).collect();
+            let parts: Vec<String> = m
+                .iter()
+                .map(|(k, v)| format!("{}: {}", escape_ident(k), escape(v)))
+                .collect();
             format!("{{{}}}", parts.join(", "))
         }
     }
@@ -236,7 +256,9 @@ pub fn escape_str(s: &str) -> String {
 /// Escape a Cypher identifier (property key, label). Backtick-quotes when needed.
 pub fn escape_ident(s: &str) -> String {
     let safe = !s.is_empty()
-        && s.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && s.chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
         && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
     if safe {
         s.to_string()
@@ -247,8 +269,10 @@ pub fn escape_ident(s: &str) -> String {
 
 /// Build a Cypher inline property map: `{k1: v1, k2: v2}`. Useful inside CREATE/MERGE.
 pub fn props(items: &[(&str, &Value)]) -> String {
-    let parts: Vec<String> =
-        items.iter().map(|(k, v)| format!("{}: {}", escape_ident(k), escape(v))).collect();
+    let parts: Vec<String> = items
+        .iter()
+        .map(|(k, v)| format!("{}: {}", escape_ident(k), escape(v)))
+        .collect();
     format!("{{{}}}", parts.join(", "))
 }
 

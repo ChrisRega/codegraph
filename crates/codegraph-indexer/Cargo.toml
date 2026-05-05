@@ -5,7 +5,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
 rust-version.workspace = true
+readme = "../../README.md"
+documentation = "https://docs.rs/codegraph-indexer"
+keywords = ["code-analysis", "lsp", "graph", "indexing", "cypher"]
+categories = ["development-tools", "command-line-utilities"]
 
 [[bin]]
 name = "codegraph-indexer"

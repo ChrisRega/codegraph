@@ -41,7 +41,11 @@ pub fn index_files_via_lsp(
         let file_lines: Vec<&str> = file_content.lines().collect();
         let line_count = file_lines.len();
         let path_lit = escape_str(rel_path);
-        let fname = abs_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let fname = abs_path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
 
         run(db, &format!(
             "MERGE (f:File {{path: {path_lit}}}) SET f.name = {fn_lit}, f.extension = 'rs', f.lines = {line_count}",
@@ -79,7 +83,10 @@ pub fn index_files_via_lsp(
     }
 
     // ── Build call graph via LSP outgoingCalls ───────────────────────────────
-    eprintln!("  [*] Building call graph via LSP ({} functions)...", fn_positions.len());
+    eprintln!(
+        "  [*] Building call graph via LSP ({} functions)...",
+        fn_positions.len()
+    );
 
     run(db, "MATCH (a:Function)-[c:CALLS]->(b:Function) DELETE c");
 
@@ -232,9 +239,15 @@ fn slice_body(file_lines: &[&str], line_start: u32, line_end: u32) -> String {
 }
 
 fn module_prefix_from_path(pkg_name: &str, file_path: &str) -> String {
-    let path = file_path.replace('\\', "/").trim_end_matches(".rs").to_string();
+    let path = file_path
+        .replace('\\', "/")
+        .trim_end_matches(".rs")
+        .to_string();
     let after_src = path.find("/src/").map(|i| &path[i + 5..]).unwrap_or(&path);
-    let clean = after_src.trim_end_matches("/mod").trim_end_matches("/lib").trim_end_matches("/main");
+    let clean = after_src
+        .trim_end_matches("/mod")
+        .trim_end_matches("/lib")
+        .trim_end_matches("/main");
     if clean.is_empty() {
         pkg_name.to_string()
     } else {

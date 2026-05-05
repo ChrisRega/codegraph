@@ -10,17 +10,29 @@ pub fn index_api_specs(db: &Db, workspace: &Path, pkg_name: &str) -> (u32, u32) 
     let mut endpoints = 0u32;
     let mut types = 0u32;
 
-    for entry in WalkDir::new(workspace).into_iter().filter_map(|e| e.ok()).filter(|e| {
-        e.file_type().is_file()
-            && !e.path().components().any(|c| {
-                let s = c.as_os_str().to_string_lossy();
-                s == "node_modules" || s == ".git" || s == "target" || s == "dist" || s == ".venv"
-            })
-    }) {
+    for entry in WalkDir::new(workspace)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_type().is_file()
+                && !e.path().components().any(|c| {
+                    let s = c.as_os_str().to_string_lossy();
+                    s == "node_modules"
+                        || s == ".git"
+                        || s == "target"
+                        || s == "dist"
+                        || s == ".venv"
+                })
+        })
+    {
         let path = entry.path();
         let name = path.file_name().unwrap_or_default().to_string_lossy();
         let ext = path.extension().unwrap_or_default().to_string_lossy();
-        let rel = path.strip_prefix(workspace).unwrap_or(path).to_string_lossy().to_string();
+        let rel = path
+            .strip_prefix(workspace)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .to_string();
 
         if is_openapi_file(&name, &ext) {
             let (e, t) = index_openapi(db, path, &rel, pkg_name);
@@ -56,7 +68,9 @@ fn is_openapi_file(name: &str, _ext: &str) -> bool {
 }
 
 fn index_openapi(db: &Db, path: &Path, rel_path: &str, pkg_name: &str) -> (u32, u32) {
-    let Ok(content) = std::fs::read_to_string(path) else { return (0, 0) };
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return (0, 0);
+    };
     let spec: serde_json::Value = match serde_yaml::from_str(&content) {
         Ok(v) => v,
         Err(e) => {
@@ -72,7 +86,9 @@ fn index_openapi(db: &Db, path: &Path, rel_path: &str, pkg_name: &str) -> (u32, 
 
     if let Some(paths) = spec.get("paths").and_then(|p| p.as_object()) {
         for (path_str, methods) in paths {
-            let Some(methods) = methods.as_object() else { continue };
+            let Some(methods) = methods.as_object() else {
+                continue;
+            };
             for (method, op) in methods {
                 let method_upper = method.to_uppercase();
                 if !["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"]
@@ -86,7 +102,10 @@ fn index_openapi(db: &Db, path: &Path, rel_path: &str, pkg_name: &str) -> (u32, 
                     .get("tags")
                     .and_then(|v| v.as_array())
                     .map(|arr| {
-                        arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(", ")
+                        arr.iter()
+                            .filter_map(|v| v.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     })
                     .unwrap_or_default();
 
@@ -106,10 +125,13 @@ fn index_openapi(db: &Db, path: &Path, rel_path: &str, pkg_name: &str) -> (u32, 
 
                 for schema_ref in extract_schema_refs(op) {
                     let type_name = schema_ref.rsplit('/').next().unwrap_or(&schema_ref);
-                    run(db, &format!(
-                        "MERGE (t:APIType {{name: {n}, spec_file: {file_lit}}})",
-                        n = escape_str(type_name),
-                    ));
+                    run(
+                        db,
+                        &format!(
+                            "MERGE (t:APIType {{name: {n}, spec_file: {file_lit}}})",
+                            n = escape_str(type_name),
+                        ),
+                    );
                     run(db, &format!(
                         "MATCH (ep:APIEndpoint {{operationId: {o}, spec_file: {file_lit}}}), (t:APIType {{name: {n}, spec_file: {file_lit}}}) CREATE (ep)-[:USES_SCHEMA]->(t)",
                         o = escape_str(op_id),
@@ -128,12 +150,18 @@ fn index_openapi(db: &Db, path: &Path, rel_path: &str, pkg_name: &str) -> (u32, 
 
     if let Some(schemas) = schemas {
         for (type_name, schema) in schemas {
-            let kind = schema.get("type").and_then(|v| v.as_str()).unwrap_or("object");
-            run(db, &format!(
-                "MERGE (t:APIType {{name: {n}, spec_file: {file_lit}}}) SET t.kind = {k}",
-                n = escape_str(type_name),
-                k = escape_str(kind),
-            ));
+            let kind = schema
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("object");
+            run(
+                db,
+                &format!(
+                    "MERGE (t:APIType {{name: {n}, spec_file: {file_lit}}}) SET t.kind = {k}",
+                    n = escape_str(type_name),
+                    k = escape_str(kind),
+                ),
+            );
 
             if let Some(props) = schema.get("properties").and_then(|p| p.as_object()) {
                 for (i, (field_name, field_def)) in props.iter().enumerate() {
@@ -159,7 +187,10 @@ fn index_openapi(db: &Db, path: &Path, rel_path: &str, pkg_name: &str) -> (u32, 
         }
     }
 
-    eprintln!("  [+] OpenAPI: {} — {endpoints} endpoints, {types} schemas", rel_path);
+    eprintln!(
+        "  [+] OpenAPI: {} — {endpoints} endpoints, {types} schemas",
+        rel_path
+    );
     (endpoints, types)
 }
 
@@ -185,7 +216,9 @@ fn extract_schema_refs(val: &serde_json::Value) -> Vec<String> {
 }
 
 fn index_graphql_sdl(db: &Db, path: &Path, rel_path: &str, pkg_name: &str) -> u32 {
-    let Ok(content) = std::fs::read_to_string(path) else { return 0 };
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return 0;
+    };
 
     let file_lit = escape_str(rel_path);
     let pkg_lit = escape_str(pkg_name);
@@ -212,11 +245,14 @@ fn index_graphql_sdl(db: &Db, path: &Path, rel_path: &str, pkg_name: &str) -> u3
                     "scalar" => "Scalar",
                     _ => "Other",
                 };
-                run(db, &format!(
-                    "MERGE (t:APIType {{name: {n}, spec_file: {file_lit}}}) SET t.kind = {k}",
-                    n = escape_str(type_name),
-                    k = escape_str(kind),
-                ));
+                run(
+                    db,
+                    &format!(
+                        "MERGE (t:APIType {{name: {n}, spec_file: {file_lit}}}) SET t.kind = {k}",
+                        n = escape_str(type_name),
+                        k = escape_str(kind),
+                    ),
+                );
                 run(db, &format!(
                     "MATCH (p:Package {{name: {pkg_lit}}}), (t:APIType {{name: {n}, spec_file: {file_lit}}}) CREATE (p)-[:EXPOSES]->(t)",
                     n = escape_str(type_name),
@@ -234,7 +270,9 @@ fn index_graphql_sdl(db: &Db, path: &Path, rel_path: &str, pkg_name: &str) -> u3
 }
 
 fn index_protobuf(db: &Db, path: &Path, rel_path: &str, pkg_name: &str) -> (u32, u32) {
-    let Ok(content) = std::fs::read_to_string(path) else { return (0, 0) };
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return (0, 0);
+    };
 
     let file_lit = escape_str(rel_path);
     let pkg_lit = escape_str(pkg_name);
@@ -252,10 +290,13 @@ fn index_protobuf(db: &Db, path: &Path, rel_path: &str, pkg_name: &str) -> (u32,
                 .next()
                 .unwrap_or("");
             if !name.is_empty() {
-                run(db, &format!(
+                run(
+                    db,
+                    &format!(
                     "MERGE (t:APIType {{name: {n}, spec_file: {file_lit}}}) SET t.kind = 'Service'",
                     n = escape_str(name),
-                ));
+                ),
+                );
                 run(db, &format!(
                     "MATCH (p:Package {{name: {pkg_lit}}}), (t:APIType {{name: {n}, spec_file: {file_lit}}}) CREATE (p)-[:EXPOSES]->(t)",
                     n = escape_str(name),
@@ -284,10 +325,13 @@ fn index_protobuf(db: &Db, path: &Path, rel_path: &str, pkg_name: &str) -> (u32,
                 .next()
                 .unwrap_or("");
             if !name.is_empty() {
-                run(db, &format!(
+                run(
+                    db,
+                    &format!(
                     "MERGE (t:APIType {{name: {n}, spec_file: {file_lit}}}) SET t.kind = 'Message'",
                     n = escape_str(name),
-                ));
+                ),
+                );
                 types += 1;
             }
         }
@@ -300,17 +344,23 @@ fn index_protobuf(db: &Db, path: &Path, rel_path: &str, pkg_name: &str) -> (u32,
                 .next()
                 .unwrap_or("");
             if !name.is_empty() {
-                run(db, &format!(
+                run(
+                    db,
+                    &format!(
                     "MERGE (t:APIType {{name: {n}, spec_file: {file_lit}}}) SET t.kind = 'Enum'",
                     n = escape_str(name),
-                ));
+                ),
+                );
                 types += 1;
             }
         }
     }
 
     if endpoints + types > 0 {
-        eprintln!("  [+] Protobuf: {} — {endpoints} RPCs, {types} types", rel_path);
+        eprintln!(
+            "  [+] Protobuf: {} — {endpoints} RPCs, {types} types",
+            rel_path
+        );
     }
     (endpoints, types)
 }

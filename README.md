@@ -1,46 +1,106 @@
 # codegraph
 
-A code-indexing toolchain that builds a queryable graph of your codebase and exposes it to LLM agents via MCP. Backed by [velr](https://crates.io/crates/velr), an embedded property-graph database with openCypher.
+A code-indexing toolchain that builds a queryable property graph of your
+codebase and exposes it to LLM agents via [MCP](https://modelcontextprotocol.io/).
+Backed by [velr](https://crates.io/crates/velr), an embedded graph
+database with openCypher.
 
-> **Status:** alpha. Public-API surfaces and on-disk format may change.
+> **Status:** alpha. velr 0.2.x is itself alpha; backend behaviour may
+> change. The on-disk format and graph schema are not yet stable.
+
+## What's in the graph
+
+The indexer walks your repo and projects it into one connected graph:
+
+```
+:Workspace ─CONTAINS─→ :Package ─CONTAINS─→ :File
+                       :Package ─DEPENDS_ON─→ :Package
+:File ←DEFINED_IN─ :Function | :Symbol
+:Function ─CALLS─→ :Function          (LSP outgoingCalls)
+:Doc ─HAS_SECTION─→ :DocSection ─MENTIONS─→ :Function | :Symbol
+:Feature ─HAS_SCENARIO─→ :Scenario ─HAS_STEP─→ :Step ─IMPLEMENTED_BY─→ :Function
+:Package ─EXPOSES─→ :APIEndpoint | :APIType
+```
+
+Full reference: [`docs/schema.md`](docs/schema.md).
 
 ## Crates
 
 | Crate | Purpose |
 | --- | --- |
-| [`codegraph-core`](crates/codegraph-core) | Shared velr adapter, query helpers, Cypher value escaping. |
-| [`codegraph-indexer`](crates/codegraph-indexer) | Walks a workspace and writes graph data: Rust (`syn`/LSP), Markdown, Gherkin/BDD, OpenAPI specs. |
-| [`codegraph-mcp`](crates/codegraph-mcp) | MCP server that exposes the resulting graph as Claude Code / Claude Desktop tools (`cypher`, `schema`, `write`, ...). |
+| [`codegraph-core`](crates/codegraph-core) | Shared velr adapter, owned `Cell` / `Table` types, Cypher value escaper. |
+| [`codegraph-indexer`](crates/codegraph-indexer) | Walks a workspace and writes graph data: Rust (LSP), TypeScript / Node (LSP), Python (LSP), Markdown, Gherkin / BDD, OpenAPI, GraphQL SDL, Protobuf. Plus `bdd-viz` HTML renderer. |
+| [`codegraph-mcp`](crates/codegraph-mcp) | MCP server exposing the graph as Claude Code / Claude Desktop tools (`cypher`, `schema`, `write`, `begin`, `commit`, `rollback`, `explain`). |
 
 ## Quick start
 
 ```bash
-# build everything
+# 1. build everything
 cargo build --workspace --release
 
-# index the current repository into ./codegraph.db
-./target/release/codegraph-indexer index --root . --db ./codegraph.db
+# 2. index your repository
+./target/release/codegraph-indexer --workspace . --db ./codegraph.db
 
-# expose it to Claude as an MCP tool
-./target/release/codegraph-mcp ./codegraph.db
+# 3. serve it to Claude
+./target/release/codegraph-mcp --db ./codegraph.db
 ```
 
-Add to your `claude_desktop_config.json` / `.claude.json`:
+Subsequent indexer runs are incremental: a sidecar
+`./codegraph.db.codegraph-meta.json` records the last-indexed git
+commit and `git diff` selects which files to re-parse. Pass `--full` to
+force a clean rebuild.
+
+### MCP wiring
+
+For Claude Desktop / Claude Code, add to `claude_desktop_config.json`
+(or the per-project `.claude.json`):
 
 ```json
 {
   "mcpServers": {
     "codegraph": {
       "command": "/abs/path/to/codegraph-mcp",
-      "args": ["/abs/path/to/codegraph.db"]
+      "args": ["--db", "/abs/path/to/codegraph.db"]
     }
   }
 }
 ```
 
-## Incremental indexing
+The full list of tools and their JSON Schemas is in
+[`docs/mcp-tools.md`](docs/mcp-tools.md).
 
-`codegraph-indexer` uses git diff (when the workspace is a git repo) plus file mtimes to skip unchanged files. There is no in-database time-travel — the graph reflects the most recent index pass.
+## Example queries
+
+```cypher
+// every BDD scenario whose steps don't all resolve to a function
+MATCH (sc:Scenario)-[:HAS_STEP]->(st:Step)
+WHERE NOT EXISTS { MATCH (st)-[:IMPLEMENTED_BY]->(:Function) }
+RETURN sc.qualified_name, count(st) AS missing
+ORDER BY missing DESC
+
+// who calls `format_table`?
+MATCH (caller:Function)-[:CALLS]->(:Function {name: 'format_table'})
+RETURN caller.qualified_name
+
+// docs that talk about a function in src/main.rs
+MATCH (s:DocSection)-[:MENTIONS]->(fn:Function)-[:DEFINED_IN]->(f:File {path: 'src/main.rs'})
+RETURN s.qualified_name, fn.qualified_name
+```
+
+## Language-server requirements
+
+The indexer requires an LSP for the chosen language to be on `$PATH`:
+
+- Rust: [`rust-analyzer`](https://rust-analyzer.github.io/)
+- TypeScript / JavaScript: [`typescript-language-server`](https://github.com/typescript-language-server/typescript-language-server)
+- Python: [`pyright-langserver`](https://github.com/microsoft/pyright)
+
+Override the binary with `--lsp <path>`.
+
+## Development
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md). Outstanding work is tracked
+in [`TODO.md`](TODO.md).
 
 ## License
 
@@ -53,4 +113,7 @@ at your option.
 
 ### Contribution
 
-Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in the work by you, as defined in the Apache-2.0 license, shall be dual-licensed as above, without any additional terms or conditions.
+Unless you explicitly state otherwise, any contribution intentionally
+submitted for inclusion in this work by you, as defined in the
+Apache-2.0 license, shall be dual-licensed as above, without any
+additional terms or conditions.
