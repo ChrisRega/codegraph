@@ -131,6 +131,28 @@ to their `:Author` via the `[:AUTHORED]` edge.
 | --- | --- | --- |
 | `limit` | integer, optional | default `50` |
 
+## `find_symbol`
+
+Fuzzy substring search over `:Function` and `:Symbol` nodes (case-insensitive,
+matched against both `qualified_name` and `name`). Results are joined to
+their defining `:File` via `[:DEFINED_IN]` and ranked client-side: exact
+match, then `name` startsWith, then `qualified_name` startsWith, then
+contains. Ties break on shorter `name` first, then lexicographic `qn`.
+
+Returns a Markdown table with `kind` (label + the Rust/LSP `kind` slug),
+`qualified_name`, `file:line`, and the first non-empty line of `body` as
+a signature.
+
+| arg | type | notes |
+| --- | --- | --- |
+| `query` | string, required | substring; trimmed; case-insensitive |
+| `limit` | integer, optional | default `25` |
+| `kind`  | string, optional | exact match against `s.kind`, e.g. `'fn'`, `'struct'` |
+
+Implementation note: candidate fetch is two `:Function` / `:Symbol`
+queries with `LIMIT 5000`, then merged + filtered + ranked in Rust.
+Avoids depending on velr's substring-match primitives directly.
+
 ## `impact`
 
 Computes the transitive blast radius of a node. Walks `[:CALLS]` outwards

@@ -108,7 +108,7 @@ for, with the lowest-token answer for each question shape.
   via `CALLS*`, `IMPLEMENTED_BY`, `MENTIONS`, `DEFINED_IN`. Returns a
   Markdown report with counts per category and the top-N affected
   nodes. Replaces the "who uses this" crawl before refactors.
-- [ ] **H2** — `find_symbol(query)`. Fuzzy / substring lookup over
+- [x] **H2** — `find_symbol(query)`. Fuzzy / substring lookup over
   `:Function` / `:Symbol` qualified names returning a Markdown table of
   `qualified_name`, `file:line`, `signature`. The graph equivalent of
   ⌘-T.

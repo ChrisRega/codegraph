@@ -111,6 +111,7 @@ into an LLM reply, plus a `:Note` mechanism for persisting findings:
 | `list_notes` | list notes (optionally filtered to a subgraph) |
 | `history` | walk `:GitCommit` snapshots stored in the graph |
 | `impact` | transitive blast radius of a node (callers, callees, mentions, scenarios) |
+| `find_symbol` | fuzzy substring search over functions and symbols, ranked |
 | `begin` / `write` / `commit` / `rollback` | buffered transactions |
 | `explain` | velr planner trace |
 

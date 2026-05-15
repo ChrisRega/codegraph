@@ -8,6 +8,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`find_symbol` MCP tool** — fuzzy substring search across
+  `:Function` and `:Symbol` nodes with relevance ranking (exact >
+  startsWith on name > startsWith on qn > contains). Returns a
+  Markdown table including `file:line` and the first line of `body`
+  as a signature.
 - **`impact` MCP tool** — transitive blast-radius report for a node.
   BFS over `[:CALLS]` (in + out) up to a bounded depth, plus one-hop for
   `[:MENTIONS]` and `[:IMPLEMENTED_BY]`. Returns a Markdown report with

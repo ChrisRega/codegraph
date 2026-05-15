@@ -55,3 +55,29 @@ Each entry: feature, what I reached for, what I wished existed.
   diamond, asserts both transitive directions appear) and
   `impact_handles_unknown_seed` (returns "Not found", not isError).
   Both green; full mcp suite 14/14.
+
+## H2 — `find_symbol`
+
+- **Reached for:** `grep -rn 'CREATE (.*:Function' crates/codegraph-indexer/src/`
+  — one shot, found the property shape (`qualified_name`, `name`,
+  `kind`, `line_start`, `line_end`, `body`). The graph would have given
+  me the same answer faster: `node_md(label='Function', ...)` would
+  have surfaced *its own* schema. Bootstrapping is a recurring theme.
+- **Defensive choice:** ranking happens in Rust, not Cypher. velr 0.2.16
+  *might* support `toLower()` + `CONTAINS` + `STARTS WITH` correctly,
+  but I'd rather pull a generous candidate set (`LIMIT 5000`) and rank
+  client-side than discover a planner edge case at runtime. The
+  trade-off is an extra `:Function` + `:Symbol` table scan per query.
+- **First-pass test fail:** my assertion `md.contains("`format`")` was
+  looking for a literally backtick-wrapped `format`, but the rendered
+  qualified_name is `` `a::format` ``, so the inner string never had a
+  backtick directly preceding `format`. Tightened to `a::format`.
+  Lesson: when asserting on Markdown output, escape-aware matching
+  beats clever substring tricks.
+- **Wish #3:** the indexer should attach a stable `signature` property
+  on `:Function` (the first line of `body`, normalized). I'm computing
+  it on every `find_symbol` call; pre-computed at index time it'd halve
+  the row size in the candidate scan.
+- **Tests:** `find_symbol_ranks_exact_above_substring` (4 fns,
+  asserts ordering exact > startsWith > contains) and
+  `find_symbol_returns_no_match_message`. mcp suite 16/16.
