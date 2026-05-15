@@ -44,6 +44,7 @@ fn main() -> ExitCode {
         db_path,
         lsp_cmd_override,
         force_full,
+        path_set: None,
     };
 
     match run_indexer(opts) {

@@ -50,6 +50,13 @@ pub struct IndexOptions {
     pub db_path: String,
     pub lsp_cmd_override: Option<String>,
     pub force_full: bool,
+    /// Live-indexing override: when `Some`, skip git diff and only
+    /// re-process the supplied workspace-relative paths. Also skips
+    /// the git-history phase and the sidecar metadata write — the
+    /// sidecar still tracks the last *committed* pass so the next
+    /// CLI run picks up where it left off. Used by the MCP server's
+    /// `--watch` mode to reflect uncommitted edits in the graph.
+    pub path_set: Option<Vec<String>>,
 }
 
 impl IndexOptions {
@@ -59,7 +66,13 @@ impl IndexOptions {
             db_path: db_path.into(),
             lsp_cmd_override: None,
             force_full: false,
+            path_set: None,
         }
+    }
+    /// Switch to live-indexing mode against the given relative paths.
+    pub fn with_paths(mut self, paths: Vec<String>) -> Self {
+        self.path_set = Some(paths);
+        self
     }
 }
 
@@ -139,7 +152,11 @@ pub fn run_indexer(opts: IndexOptions) -> Result<IndexStats, String> {
         db_path,
         lsp_cmd_override,
         force_full,
+        path_set,
     } = opts;
+    // Live mode: caller supplied an explicit path set. Skip git diff,
+    // skip history phase, do not advance sidecar metadata.
+    let live_paths = path_set;
 
     let workspace_display = workspace_input.display().to_string();
     let workspace = workspace_input.canonicalize().map_err(|e| {
@@ -183,31 +200,37 @@ pub fn run_indexer(opts: IndexOptions) -> Result<IndexStats, String> {
             .filter(|s| !s.is_empty())
     };
 
-    let (changed_files, is_full) = match (&last_indexed_hash, head_hash.is_empty()) {
-        (Some(prev_hash), false) => {
-            if *prev_hash == head_hash {
-                eprintln!("  [=] Already indexed at {}. Nothing to do.", head_short);
-                return Ok(IndexStats {
-                    mode: "noop",
-                    head_hash: head_hash.clone(),
-                    ..Default::default()
-                });
+    let (changed_files, is_full) = if let Some(paths) = &live_paths {
+        eprintln!("  [~] Live: {} explicit path(s)", paths.len());
+        (paths.clone(), false)
+    } else {
+        match (&last_indexed_hash, head_hash.is_empty()) {
+            (Some(prev_hash), false) => {
+                if *prev_hash == head_hash {
+                    eprintln!("  [=] Already indexed at {}. Nothing to do.", head_short);
+                    return Ok(IndexStats {
+                        mode: "noop",
+                        head_hash: head_hash.clone(),
+                        ..Default::default()
+                    });
+                }
+                let changed = git_changed_files(&workspace, prev_hash);
+                let prev_short = prev_hash.chars().take(7).collect::<String>();
+                eprintln!(
+                    "  [~] Incremental: {}..{} ({} changed files)",
+                    prev_short,
+                    head_short,
+                    changed.len()
+                );
+                (changed, false)
             }
-            let changed = git_changed_files(&workspace, prev_hash);
-            let prev_short = prev_hash.chars().take(7).collect::<String>();
-            eprintln!(
-                "  [~] Incremental: {}..{} ({} changed files)",
-                prev_short,
-                head_short,
-                changed.len()
-            );
-            (changed, false)
-        }
-        _ => {
-            eprintln!("  [*] Full index (no previous commit recorded or --full)");
-            (Vec::new(), true)
+            _ => {
+                eprintln!("  [*] Full index (no previous commit recorded or --full)");
+                (Vec::new(), true)
+            }
         }
     };
+    let is_live = live_paths.is_some();
 
     // On a full reindex wipe everything the indexer owns, in addition to the
     // per-pass wipes that happen later (BDD / Markdown / code nodes). Without
@@ -399,6 +422,9 @@ pub fn run_indexer(opts: IndexOptions) -> Result<IndexStats, String> {
 
     // ── Phase 5: GitCommit + Author history ──────────────────────────────────
     //
+    // Skipped in live mode — uncommitted edits don't deserve a `:GitCommit`
+    // node, and we'd just re-MERGE the existing HEAD on every save.
+    //
     // Strategy:
     //   * On a full reindex (or first-ever run) we backfill the last
     //     `HISTORY_BACKFILL_LIMIT` commits reachable from HEAD.
@@ -407,7 +433,7 @@ pub fn run_indexer(opts: IndexOptions) -> Result<IndexStats, String> {
     // Each commit becomes a `:GitCommit`, linked to its `:Author`, the
     // `:Workspace`, and to its parents via `:PARENT_OF`. Re-using `MERGE`
     // makes the operation idempotent across runs.
-    if !head_hash.is_empty() {
+    if !head_hash.is_empty() && !is_live {
         let range = match (&last_indexed_hash, is_full) {
             (Some(prev), false) if prev != &head_hash => format!("{prev}..HEAD"),
             _ => format!("-n {HISTORY_BACKFILL_LIMIT}"),
@@ -539,7 +565,9 @@ pub fn run_indexer(opts: IndexOptions) -> Result<IndexStats, String> {
     fire_watch_triggers(&db, &head_hash);
 
     // ── Persist sidecar metadata ─────────────────────────────────────────────
-    if !head_hash.is_empty() {
+    // Skipped in live mode — the sidecar tracks the last *committed* pass
+    // so the next CLI/Auto run still picks up where it left off.
+    if !head_hash.is_empty() && !is_live {
         if let Err(e) = meta::save(
             &meta_path,
             &meta::Meta {
@@ -551,7 +579,13 @@ pub fn run_indexer(opts: IndexOptions) -> Result<IndexStats, String> {
         }
     }
 
-    let mode = if is_full { "full" } else { "incremental" };
+    let mode = if is_live {
+        "live"
+    } else if is_full {
+        "full"
+    } else {
+        "incremental"
+    };
     eprintln!("\n=== Done ({mode}) ===");
     eprintln!("  Symbols:   {}", total_symbols);
     eprintln!("  Functions: {}", total_functions);
@@ -559,7 +593,7 @@ pub fn run_indexer(opts: IndexOptions) -> Result<IndexStats, String> {
     eprintln!("  DB:        {}", db_path);
 
     Ok(IndexStats {
-        mode: if is_full { "full" } else { "incremental" },
+        mode,
         symbols: total_symbols as usize,
         functions: total_functions as usize,
         call_edges: call_edges as usize,
@@ -1586,6 +1620,18 @@ fn fire_watch_triggers(db: &Db, head_hash: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn index_options_with_paths_switches_to_live_mode() {
+        let opts = IndexOptions::new(PathBuf::from("/x"), "db").with_paths(vec![
+            "src/a.rs".into(),
+            "src/b.rs".into(),
+        ]);
+        assert!(opts.path_set.is_some());
+        assert_eq!(opts.path_set.as_ref().unwrap().len(), 2);
+        // Sanity: the auto-mode flags are independent.
+        assert!(!opts.force_full);
+    }
 
     /// Build a tiny throw-away git repo with two commits and verify the
     /// log-range parser returns both, with parents wired up.
