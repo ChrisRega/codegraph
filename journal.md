@@ -6,6 +6,44 @@ Now with persistent LSP + live mode actually wired in this session, so
 the MCP tools are responsive enough to use as a primary navigation
 mechanism. Real experience reports below.
 
+### (12) coverage_md
+
+- **Reached for first:** `mcp__codegraph__find_symbol("handle_concept")`
+  to find a similar handler shape to crib from (Markdown-rendered
+  multi-section dossier). Single tool call, exact location returned.
+- **Then:** three `mcp__codegraph__cypher_md` calls to smoke-test the
+  Cypher patterns I wanted to use:
+  1. `WHERE NOT (f)<-[:CALLS]-(:Function)` — works
+  2. `OPTIONAL MATCH ... WITH ... WHERE count = 0` — works
+  3. `WHERE NOT EXISTS { MATCH ... }` — **ERROR** "tried to match
+     MultiPartQuery starting here"
+  Caught the velr planner gap *before* I wrote any code. Three
+  `cypher_md` calls saved a build-fail-fix cycle.
+- **Then a second velr surprise** caught at runtime:
+  `WHERE NOT f:Test AND NOT (f)<-[:TESTS]-(:Test)` rejected with
+  "Stage3 bind-table existential filtering only supports existential
+  predicate trees". Splitting the label predicate (drop from Cypher)
+  and the existential (keep) made both queries planner-friendly. The
+  test-label drop became a client-side filter via a HashSet built from
+  one extra `MATCH (t:Test)` query.
+- **The dogfood feedback loop is real:** while developing this tool
+  I saw `mcp__codegraph__index_status` showing **23 runs total, last
+  duration 49s**. Each save of `main.rs` was triggering a full
+  workspace re-parse (the sidecar filter caught one feedback source
+  but the long batches suggest there's more — maybe the watcher is
+  catching every individual save during my edit storm and queuing
+  them all). Worth diagnosing later via the existing status fields.
+- **What I built without a single grep:** find handler → check schema
+  capabilities → write code → unit tests. Zero `Read` of unrelated
+  files. The tool is the documentation.
+- **Wish:** velr should grow proper `EXISTS { ... }` subquery support;
+  the `WHERE NOT EXISTS { MATCH ... }` form is the natural way to
+  express "modules with no doc-mentions" and forced me into a less
+  readable client-side set-diff. Filed mentally for the velr roadmap.
+- **Tests:** `coverage_md_surfaces_orphans_and_untested` (4-node
+  graph asserts each section), `coverage_md_excludes_test_functions_from_orphans`
+  (single :Test fn shouldn't appear in orphans). mcp suite 35/35.
+
 ### (b) Sidecar feedback-loop filter
 
 - **Reached for first:** `mcp__codegraph__find_symbol("is_indexable_event_path")`

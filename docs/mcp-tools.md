@@ -11,6 +11,34 @@ short Cypher cheat-sheet. No arguments. Use this first when wiring up
 an LLM session — the result describes the graph the model is allowed to
 query.
 
+## `coverage_md`
+
+Single Markdown report surfacing the dim spots of the graph — the
+`grep -L` of code intelligence. Sections:
+
+1. **Orphan functions** — `:Function`s with no inbound `[:CALLS]`.
+   Excludes `:Test`. Either entry points (CLI `main`, public API) or
+   genuinely dead code.
+2. **Untested functions, ranked by `[:CALLS]` fan-in** — non-test
+   functions with no inbound `[:TESTS]`. Sorted by how many callers
+   depend on them, so the top of the list = best ROI for adding a
+   test.
+3. **Files with no `:Note`** — `:File`s nobody has annotated via
+   `write_note`.
+4. **Packages with zero doc-mentions** — `:Package`s whose files
+   contain no function mentioned by any `:DocSection`.
+
+| arg | type | notes |
+| --- | --- | --- |
+| `limit` | integer, optional | max rows per category, default `15` |
+
+Implementation note: velr 0.2.16's planner rejects
+`WHERE NOT n:Label AND NOT (pattern)` in a single clause and does not
+support `EXISTS { MATCH ... }` subqueries. The handler issues a small
+fan-out of plain queries and combines them with client-side
+set-difference / filtering — robust against planner shape limits at the
+cost of two extra round-trips.
+
 ## `index_status`
 
 Reports the live indexer's state when the MCP server was started with

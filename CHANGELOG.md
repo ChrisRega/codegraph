@@ -14,6 +14,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   single-file save left the whole codebase CALLS-less until the next
   full reindex. The wipe is now scoped to callers in the current pass,
   so unchanged files keep their call graph.
+- **`coverage_md` MCP tool** — single Markdown report of the graph's
+  dim spots: orphan functions (no inbound `[:CALLS]`), untested
+  functions ranked by `[:CALLS]` fan-in, files with no `:Note`s, and
+  packages with zero doc-mentions. Onboarding hot list +
+  refactor-risk hot list in one call.
 - **Persistent LSP pool** (`codegraph_indexer::LspPool`). With
   `--watch`, the MCP server now keeps every language server alive
   across reindex batches — `rust-analyzer`, `typescript-language-server`,
