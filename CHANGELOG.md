@@ -8,6 +8,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Per-pass `[:CALLS]` scoping (bug fix).** `index_files_via_lsp`
+  used to wipe *every* `[:CALLS]` edge in the graph before rebuilding
+  for the changed-file set. In incremental and live mode that meant a
+  single-file save left the whole codebase CALLS-less until the next
+  full reindex. The wipe is now scoped to callers in the current pass,
+  so unchanged files keep their call graph.
 - **Persistent LSP pool** (`codegraph_indexer::LspPool`). With
   `--watch`, the MCP server now keeps every language server alive
   across reindex batches — `rust-analyzer`, `typescript-language-server`,

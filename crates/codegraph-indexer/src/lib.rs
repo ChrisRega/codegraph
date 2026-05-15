@@ -1684,6 +1684,50 @@ mod tests {
         assert!(!opts.force_full);
     }
 
+    /// Verify the scoped CALLS wipe (used between passes in
+    /// `index_files_via_lsp`) leaves CALLS originating from unchanged
+    /// callers intact. The pre-fix bug was that an unconditional global
+    /// DELETE wiped the whole call graph on every incremental pass.
+    #[test]
+    fn scoped_calls_wipe_preserves_unchanged_callers() {
+        let db = codegraph_core::Db::open_in_memory().unwrap();
+        for n in ["caller_changed", "caller_unchanged", "callee_a", "callee_b"] {
+            db.run(&format!(
+                "CREATE (:Function {{qualified_name: 'm::{n}', name: '{n}'}})"
+            ))
+            .unwrap();
+        }
+        for (a, b) in [
+            ("caller_changed", "callee_a"),
+            ("caller_unchanged", "callee_b"),
+        ] {
+            db.run(&format!(
+                "MATCH (a:Function {{qualified_name: 'm::{a}'}}), \
+                       (b:Function {{qualified_name: 'm::{b}'}}) \
+                 CREATE (a)-[:CALLS]->(b)"
+            ))
+            .unwrap();
+        }
+
+        // Mimic the scoped wipe: only `caller_changed` is in the current pass.
+        let in_list = format!("'{}'", "m::caller_changed");
+        db.run(&format!(
+            "MATCH (a:Function)-[c:CALLS]->(b:Function) \
+             WHERE a.qualified_name IN [{in_list}] DELETE c"
+        ))
+        .unwrap();
+
+        let t = db
+            .query("MATCH (a)-[:CALLS]->(b) RETURN a.qualified_name AS a, b.qualified_name AS b")
+            .unwrap();
+        assert_eq!(t.rows.len(), 1, "exactly one CALLS edge should survive");
+        assert_eq!(
+            t.rows[0][0].as_str().unwrap_or(""),
+            "m::caller_unchanged",
+            "unchanged caller's CALLS should remain"
+        );
+    }
+
     #[test]
     fn lsp_pool_starts_empty() {
         let pool = LspPool::new();

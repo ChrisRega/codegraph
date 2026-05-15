@@ -125,7 +125,30 @@ pub fn index_files_via_lsp(
         fn_positions.len()
     );
 
-    run(db, "MATCH (a:Function)-[c:CALLS]->(b:Function) DELETE c");
+    // Scope the CALLS wipe to functions in THIS pass. The previous
+    // unconditional `MATCH (a:Function)-[c:CALLS]->(b:Function) DELETE c`
+    // nuked the entire call graph on every incremental pass, so a single-
+    // file save in --watch live mode left the rest of the codebase
+    // CALLS-less until the next full reindex. With per-pass scoping, only
+    // the changed files' callers are rewritten; everything else stays put.
+    if !fn_positions.is_empty() {
+        let current_qns: HashSet<&str> = fn_positions
+            .iter()
+            .map(|(_, _, _, qn)| qn.as_str())
+            .collect();
+        let in_list = current_qns
+            .iter()
+            .map(|qn| escape_str(qn))
+            .collect::<Vec<_>>()
+            .join(",");
+        run(
+            db,
+            &format!(
+                "MATCH (a:Function)-[c:CALLS]->(b:Function) \
+                 WHERE a.qualified_name IN [{in_list}] DELETE c"
+            ),
+        );
+    }
 
     for (abs_path, line, character, caller_qn) in &fn_positions {
         let calls = match lsp.outgoing_calls(abs_path, *line, *character) {
