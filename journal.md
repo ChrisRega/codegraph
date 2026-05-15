@@ -1,5 +1,49 @@
 # codegraph build journal
 
+## Round 4 — refactor pass + first real production bug
+
+The K-series refactor (1b/1c/1a/2a) shipped clean — no behavior
+change, 69/69 tests through every step. After restart I noticed a
+real production issue worth recording.
+
+### The 11 GB stuck-watcher
+
+After the Claude Code restart, `index_status` reported `state: running,
+runs_total: 0` and never moved off the first batch. Investigation
+under `/proc/206909`:
+
+- `State: S (sleeping)` — blocked on `unix_stream_read_generic` (the
+  LSP stdio pipe).
+- `VmRSS: 11.3 GB`, `VmSize: 13 GB` — runaway memory accumulation.
+- 11 minutes of accumulated CPU.
+
+**Root cause hypothesis:** the per-pass `[:CALLS]` wipe I shipped in
+commit `726221e` (CALLS scoping fix) builds an `IN [...]` list with
+every function in the current pass. After the recent edit storm and
+the refactor commits, the live-mode batch's `path_set` was big — the
+LSP indexed many files, and `fn_positions` accumulated hundreds of
+qualified_names. velr 0.2.16's planner explodes on `IN [...] DELETE`
+combinations past a few hundred entries: multi-GB heap, no forward
+progress.
+
+**Defensive fix shipped:** chunk the `IN [...]` list at 100 qns per
+chunk. Same correctness, bounded memory.
+
+**Real lessons:**
+1. Building `index_status` was the right call — it surfaced the
+   stuck pass within seconds. Without it I'd have just noticed
+   "the graph is stale" and never connected it to the indexer.
+2. velr's planner edge cases are still being discovered. The
+   pattern of "WHERE x IN [hundreds of items] + write clause" is
+   now banned in our code; chunked helper would be cleaner long-term.
+3. The watcher had no guardrail against runaway passes. Possible
+   future fix: a watchdog that kills the pass after N seconds and
+   reports it via `last_error`.
+
+The stuck process is still alive on the host — needs a Claude Code
+restart to clear. The fix lands now so the next run doesn't hit
+the same trap.
+
 ## Round 3 — quick-win fixes + future-ideas reach-down
 
 Now with persistent LSP + live mode actually wired in this session, so
