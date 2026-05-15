@@ -2500,21 +2500,157 @@ fn maybe_reopen(
 
 // ── Main loop ─────────────────────────────────────────────────────────────────
 
+// ── filesystem watcher (--watch mode) ─────────────────────────────────────────
+
+/// True for paths the indexer cares about (Rust / TS / Py / Markdown / Gherkin /
+/// API specs). Filters out the obvious noise so we don't restart rust-analyzer
+/// because the user's editor wrote a swap file.
+fn is_indexable_event_path(p: &std::path::Path) -> bool {
+    let s = p.to_string_lossy();
+    if s.contains("/.git/")
+        || s.contains("/target/")
+        || s.contains("/node_modules/")
+        || s.contains("/.cargo/")
+        || s.ends_with('~')
+        || s.ends_with(".swp")
+        || s.ends_with(".swx")
+        || s.ends_with(".tmp")
+    {
+        return false;
+    }
+    matches!(
+        p.extension().and_then(|e| e.to_str()),
+        Some(
+            "rs" | "ts"
+                | "tsx"
+                | "js"
+                | "jsx"
+                | "py"
+                | "md"
+                | "feature"
+                | "yaml"
+                | "yml"
+                | "json"
+                | "graphql"
+                | "proto"
+                | "toml"
+        )
+    )
+}
+
+/// Spawn a background thread that watches `workspace` recursively and, on
+/// every debounced batch of indexable file changes, runs the indexer with
+/// `force_full=false`. Uses the same `Db` file as the MCP server; the
+/// existing `db_mtime`-based reopen logic picks up the writes.
+///
+/// Known limitation (v1): the indexer's incremental path uses `git diff`
+/// between the last indexed commit and HEAD. Uncommitted saves trigger a
+/// reindex pass but the pass itself sees nothing new and returns "noop".
+/// In practice this means watch mode auto-refreshes on `git commit`, not
+/// on save. Lifting this needs an explicit `reindex_paths(...)` API on
+/// the indexer.
+fn spawn_indexer_watcher(workspace: String, db_path: String, debounce_ms: u64) {
+    use notify::{RecursiveMode, Watcher};
+    use std::sync::mpsc::channel;
+    use std::time::{Duration, Instant};
+
+    std::thread::spawn(move || {
+        let workspace_path = std::path::PathBuf::from(&workspace);
+        let canonical = match workspace_path.canonicalize() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("[watch] cannot resolve workspace '{workspace}': {e}");
+                return;
+            }
+        };
+        eprintln!(
+            "[watch] watching {} (debounce {}ms)",
+            canonical.display(),
+            debounce_ms
+        );
+
+        let (tx, rx) = channel::<notify::Result<notify::Event>>();
+        let mut watcher = match notify::recommended_watcher(tx) {
+            Ok(w) => w,
+            Err(e) => {
+                eprintln!("[watch] could not create watcher: {e}");
+                return;
+            }
+        };
+        if let Err(e) = watcher.watch(&canonical, RecursiveMode::Recursive) {
+            eprintln!("[watch] could not start watching: {e}");
+            return;
+        }
+        // Keep the watcher alive for the duration of this thread.
+        let _watcher_keepalive = watcher;
+
+        let debounce = Duration::from_millis(debounce_ms);
+        loop {
+            // Block until the first event of a new batch.
+            let first = match rx.recv() {
+                Ok(ev) => ev,
+                Err(_) => return, // sender dropped, exit thread
+            };
+            let mut batch = vec![first];
+            // Drain the channel for `debounce` ms so a flurry of writes coalesces.
+            let deadline = Instant::now() + debounce;
+            loop {
+                let remaining = deadline
+                    .checked_duration_since(Instant::now())
+                    .unwrap_or_default();
+                match rx.recv_timeout(remaining) {
+                    Ok(ev) => batch.push(ev),
+                    Err(_) => break,
+                }
+            }
+            // Collect the relevant paths from this batch.
+            let mut indexable_paths: std::collections::BTreeSet<std::path::PathBuf> =
+                std::collections::BTreeSet::new();
+            for ev in batch.iter().flatten() {
+                for p in &ev.paths {
+                    if is_indexable_event_path(p) {
+                        indexable_paths.insert(p.clone());
+                    }
+                }
+            }
+            if indexable_paths.is_empty() {
+                continue;
+            }
+            eprintln!(
+                "[watch] {} indexable file(s) changed, triggering reindex",
+                indexable_paths.len()
+            );
+            let opts = codegraph_indexer::IndexOptions::new(canonical.clone(), &db_path);
+            match codegraph_indexer::run_indexer(opts) {
+                Ok(stats) => eprintln!(
+                    "[watch] reindex done: mode={} symbols={} functions={} calls={}",
+                    stats.mode, stats.symbols, stats.functions, stats.call_edges
+                ),
+                Err(e) => eprintln!("[watch] reindex failed: {e}"),
+            }
+        }
+    });
+}
+
 const HELP: &str = "\
 codegraph-mcp — MCP server exposing a velr-backed graph database to LLM agents
 
 USAGE:
-    codegraph-mcp --db <path>
+    codegraph-mcp --db <path> [--watch <workspace>]
     codegraph-mcp <path>
 
 The MCP server reads JSON-RPC requests on stdin and writes responses on
-stdout. Tools advertised: schema, cypher, begin, write, commit, rollback,
-explain. See docs/mcp-tools.md for details.
+stdout. With --watch, a background thread re-runs the indexer whenever
+files in <workspace> change (debounced 500ms). The indexer's standard
+incremental path is used; uncommitted edits are not picked up until they
+are committed. See docs/mcp-tools.md.
 
 OPTIONS:
-    --db <path>     velr database file
-    -h, --help      Show this help and exit
-    -V, --version   Print version and exit
+    --db <path>          velr database file
+    --watch <workspace>  Re-run the indexer on file changes in <workspace>
+    --debounce-ms <ms>   Watcher debounce window (default 500)
+    -h, --help           Show this help and exit
+    -V, --version        Print version and exit
 ";
 
 fn main() {
@@ -2527,16 +2663,26 @@ fn main() {
         println!("codegraph-mcp {}", env!("CARGO_PKG_VERSION"));
         return;
     }
-    let db_path = args
-        .iter()
-        .zip(args.iter().skip(1))
-        .find(|(flag, _)| flag.as_str() == "--db")
-        .map(|(_, val)| val.clone())
+    let arg_value = |name: &str| -> Option<String> {
+        args.iter()
+            .zip(args.iter().skip(1))
+            .find(|(f, _)| f.as_str() == name)
+            .map(|(_, v)| v.clone())
+    };
+    let db_path = arg_value("--db")
         .or_else(|| args.iter().skip(1).find(|a| !a.starts_with("--")).cloned())
         .unwrap_or_else(|| {
             eprintln!("Usage: codegraph-mcp --db <path>\n\nRun with --help for details.");
             std::process::exit(1);
         });
+    let watch_path = arg_value("--watch");
+    let debounce_ms: u64 = arg_value("--debounce-ms")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(500);
+
+    if let Some(ws) = &watch_path {
+        spawn_indexer_watcher(ws.clone(), db_path.clone(), debounce_ms);
+    }
 
     let mut db = Db::open(&db_path).unwrap_or_else(|e| {
         eprintln!("Failed to open database at {db_path}: {e}");

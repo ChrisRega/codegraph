@@ -60,11 +60,28 @@ For Claude Desktop / Claude Code, add to `claude_desktop_config.json`
   "mcpServers": {
     "codegraph": {
       "command": "/abs/path/to/codegraph-mcp",
-      "args": ["--db", "/abs/path/to/codegraph.db"]
+      "args": [
+        "--db", "/abs/path/to/codegraph.db",
+        "--watch", "/abs/path/to/your/repo"
+      ]
     }
   }
 }
 ```
+
+`--watch <workspace>` is optional. With it, the MCP server spawns a
+filesystem watcher and re-runs the indexer (incremental mode) whenever
+files change in the workspace, debounced by `--debounce-ms` (default
+500). The MCP server stays read-available the whole time; on the next
+tool call after a reindex it transparently reopens the velr handle
+because the on-disk mtime advanced.
+
+> **v1 caveat.** The watcher triggers `run_indexer` in incremental
+> mode, which keys off `git diff` between the sidecar's last-indexed
+> commit and HEAD. Uncommitted saves fire the watcher but the indexer
+> sees no diff and exits as a noop. Net behaviour today: graph
+> auto-refreshes on `git commit`, not on save. Lifting this needs an
+> explicit per-path reindex API on the indexer library.
 
 The full list of tools and their JSON Schemas is in
 [`docs/mcp-tools.md`](docs/mcp-tools.md).

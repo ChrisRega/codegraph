@@ -1,5 +1,45 @@
 # codegraph build journal
 
+## Round 2 — live-indexing in the MCP server (Option A)
+
+Resumed after the user wired `mcp__codegraph__*` into Claude Code. Now
+I'm actually using the graph for lookups instead of grepping. Real
+experience report:
+
+### Library refactor of the indexer
+
+- **Reached for first:** `mcp__codegraph__schema` to see what's in the
+  graph (13 vertex labels, 12 edge types — including the new `:Test`
+  and `[:TESTS]` from H6). `mcp__codegraph__find_symbol("main")` to
+  locate the indexer's `main` (124 matches; `codegraph-indexer::main::main`
+  at line 118). Then `mcp__codegraph__node_md` for the file dossier,
+  followed by a `mcp__codegraph__cypher_md` listing every `:Function`
+  in `main.rs` with line ranges. **All four tool calls returned exactly
+  what I needed; no greps were used.**
+- **Concrete win:** the file dossier surfaced that `main` is 429 lines
+  (118–547) and identified the 22 helper functions that needed to come
+  along for the ride. With grep I'd have read the file end-to-end. The
+  `cypher_md` line-range table directly shaped my refactor plan.
+- **Surprise:** `find_symbol` ranking confirmed substring matches all
+  ranked correctly: exact `main` came first, even though there are 124
+  total hits. The H2 ranking heuristic survives contact with real data.
+- **Pleasant:** `impact(value="codegraph-indexer::main::main", depth=2)`
+  showed the 74-callee blast radius in <1s, no LSP needed. That would
+  have been a recursive `git grep -n` walk taking minutes manually.
+- **Limit hit:** the qualified_name uses `-` (dash) where I'd assumed
+  `_` (underscore): `codegraph-indexer::main::main` not
+  `codegraph_indexer::main::main`. My first `impact` call missed for
+  exactly this reason. `find_symbol` saved me — the substring match
+  surfaced the correct qn shape. Lesson: always start with
+  `find_symbol` when constructing a fully-qualified address.
+- **Refactor itself was uneventful.** Copy main.rs → lib.rs, replace
+  `fn main` with `pub fn run_indexer`, swap `process::exit` for
+  `Result::Err`, swap early `return;` for `return Ok(IndexStats::noop)`.
+  Three rustc-driven iterations (u32 vs usize, etc.) and it built.
+  56/56 tests still green.
+
+
+
 A log of what it felt like to dogfood `codegraph` while building the
 H-series features. The premise: I (Claude) should use the
 `codegraph` MCP tools for code lookups instead of `grep` / `find` /

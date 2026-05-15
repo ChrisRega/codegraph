@@ -8,6 +8,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`--watch <workspace>` mode for `codegraph-mcp`.** When set, the
+  MCP server spawns a `notify`-based filesystem watcher that
+  re-runs the indexer (incremental mode) on a debounced batch of
+  file changes (default 500ms). The MCP server's existing `db_mtime`-
+  based reopen logic picks up the new graph state on the next tool
+  call. v1 limitation: triggers a noop until the user `git commit`s,
+  because the indexer's incremental path keys off `git diff`. The
+  full save-time path needs an explicit `reindex_paths()` indexer API
+  (planned). Pairs with the `codegraph-indexer` library refactor in
+  this release: `pub fn run_indexer(opts: IndexOptions) -> IndexStats`
+  is now callable from any embedder.
 - **`watch` / `unwatch` / `list_watches` MCP tools** + indexer Phase 7.
   Mark a node as watched: the next indexer run diffs the current
   `body` against the captured baseline, and on change attaches a

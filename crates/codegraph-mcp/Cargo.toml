@@ -18,9 +18,11 @@ name = "codegraph-mcp"
 path = "src/main.rs"
 
 [dependencies]
-codegraph-core = { path = "../codegraph-core" }
+codegraph-core    = { path = "../codegraph-core" }
+codegraph-indexer = { path = "../codegraph-indexer" }
 velr        = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
 uuid        = { workspace = true }
 anyhow      = { workspace = true }
+notify      = "8"
