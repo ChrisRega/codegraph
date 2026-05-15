@@ -284,6 +284,21 @@ fn tool_list() -> Value {
                 }
             },
             {
+                "name": "explore",
+                "description": "Token-budgeted graph exploration. Starts at the identified node and walks outward (BFS up to `max_depth`), then greedily fills a Markdown report with the most informative neighbours until `char_budget` is exhausted. \"Informative\" = high degree + has notes + has doc mentions. Replaces the agent pattern of issuing 5–10 `node_md` calls to map a subgraph: one bounded call returns the best slice. Output ends with a footer telling you how many candidates were dropped so you know whether to raise the budget or pivot.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "label":       { "type": "string", "description": "Seed node label, e.g. 'Function'." },
+                        "key":         { "type": "string", "description": "Seed node identifying property, e.g. 'qualified_name'." },
+                        "value":       { "type": "string", "description": "Seed node property value." },
+                        "char_budget": { "type": "integer", "description": "Approximate output budget in characters (~ tokens × 4). Default 8000." },
+                        "max_depth":   { "type": "integer", "description": "BFS depth cap (default 2, max 4)." }
+                    },
+                    "required": ["label", "key", "value"]
+                }
+            },
+            {
                 "name": "index_status",
                 "description": "Report the live indexer's current state when the MCP server was started with `--watch`. Use this to wait until pending edits are reflected in the graph before issuing fresh queries: when `state` is `idle`, the most recent debounced batch is fully applied. Without `--watch`, returns a stub showing the live indexer is not running.",
                 "inputSchema": { "type": "object", "properties": {} }
@@ -1425,6 +1440,290 @@ fn handle_define_concept(db: &Db, params: &Value) -> Value {
         "concept `{name}` now describes {attached} member{}",
         if attached == 1 { "" } else { "s" }
     ))
+}
+
+// ── explore (token-budgeted) ──────────────────────────────────────────────────
+
+#[derive(Clone)]
+struct ExploreCandidate {
+    qn: String,
+    label: String,
+    depth: u32,
+    /// Most recent edge type used to reach this candidate (for the rendered hint).
+    via_rel: String,
+    /// Whether the BFS entered this node via outgoing or incoming edges.
+    via_outgoing: bool,
+    /// Cached importance metrics.
+    deg: i64,
+    has_notes: bool,
+    has_mentions: bool,
+}
+
+impl ExploreCandidate {
+    fn score(&self) -> f64 {
+        let depth_penalty = (self.depth as f64) * 5.0;
+        let base = self.deg as f64;
+        let notes = if self.has_notes { 4.0 } else { 0.0 };
+        let mentions = if self.has_mentions { 2.0 } else { 0.0 };
+        base + notes + mentions - depth_penalty
+    }
+
+    fn render_line(&self) -> String {
+        let arrow = if self.via_outgoing {
+            format!("-[:{}]->", self.via_rel)
+        } else {
+            format!("<-[:{}]-", self.via_rel)
+        };
+        let mut tags = Vec::new();
+        if self.deg > 0 {
+            tags.push(format!("deg {}", self.deg));
+        }
+        if self.has_notes {
+            tags.push("has notes".to_string());
+        }
+        if self.has_mentions {
+            tags.push("doc'd".to_string());
+        }
+        let tag = if tags.is_empty() {
+            String::new()
+        } else {
+            format!(" _({})_", tags.join(", "))
+        };
+        format!(
+            "- depth {} `{}` `{}` `{}`{tag}",
+            self.depth, arrow, self.label, self.qn
+        )
+    }
+}
+
+/// Single-hop neighbours of `seed_qns`. The label constraint on the
+/// matched far-side node is dropped so any neighbour type can surface.
+fn explore_hop(
+    db: &Db,
+    seed_label: &str,
+    seed_key: &str,
+    seed_qns: &[String],
+    outgoing: bool,
+) -> Vec<(String, String, String)> {
+    if seed_qns.is_empty() {
+        return Vec::new();
+    }
+    let in_list = seed_qns
+        .iter()
+        .map(|s| escape_str(s))
+        .collect::<Vec<_>>()
+        .join(",");
+    let pattern = if outgoing {
+        format!("(n:{seed_label})-[r]->(m)")
+    } else {
+        format!("(n:{seed_label})<-[r]-(m)")
+    };
+    let q = format!(
+        "MATCH {pattern} \
+         WHERE n.{seed_key} IN [{in_list}] \
+         RETURN DISTINCT type(r) AS rel, labels(m) AS lbls, m.qualified_name AS qn"
+    );
+    let t = match db.query(&q) {
+        Ok(t) => t,
+        Err(_) => return Vec::new(),
+    };
+    t.rows
+        .iter()
+        .filter_map(|row| {
+            let rel = row
+                .first()
+                .and_then(|c| c.as_str())
+                .unwrap_or("")
+                .to_string();
+            let lbls = row
+                .get(1)
+                .and_then(|c| c.as_str())
+                .unwrap_or("[]")
+                .to_string();
+            let qn = row.get(2).and_then(|c| c.as_str())?.to_string();
+            if qn.is_empty() {
+                return None;
+            }
+            Some((rel, lbls, qn))
+        })
+        .collect()
+}
+
+fn handle_explore(db: &Db, params: &Value) -> Value {
+    let label = match params.get("label").and_then(|v| v.as_str()) {
+        Some(s) if safe_ident(s) => s.to_string(),
+        Some(s) => return err_text(format!("invalid label: {s:?}")),
+        None => return err_text("missing required argument: label".to_string()),
+    };
+    let key = match params.get("key").and_then(|v| v.as_str()) {
+        Some(s) if safe_ident(s) => s.to_string(),
+        Some(s) => return err_text(format!("invalid key: {s:?}")),
+        None => return err_text("missing required argument: key".to_string()),
+    };
+    let value = match params.get("value").and_then(|v| v.as_str()) {
+        Some(s) => s.to_string(),
+        None => return err_text("missing required argument: value".to_string()),
+    };
+    let char_budget = params
+        .get("char_budget")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(8000)
+        .max(500) as usize;
+    let max_depth = params
+        .get("max_depth")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(2)
+        .clamp(1, 4) as u32;
+
+    let val_lit = escape_str(&value);
+
+    let seed_q =
+        format!("MATCH (n:{label} {{{key}: {val_lit}}}) RETURN properties(n) AS props LIMIT 1");
+    let seed_props = match db.query(&seed_q) {
+        Ok(t) if !t.rows.is_empty() => t.rows[0]
+            .first()
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .to_string(),
+        Ok(_) => {
+            return ok_text(format!(
+                "# Not found\n\nNo `:{label}` with `{key} = {value:?}`.\n"
+            ))
+        }
+        Err(e) => return err_text(format!("seed lookup failed: {e}")),
+    };
+
+    use std::collections::{BTreeMap, BTreeSet};
+    let mut visited: BTreeSet<String> = BTreeSet::new();
+    visited.insert(value.clone());
+    let mut frontier: Vec<String> = vec![value.clone()];
+    let mut discovered: Vec<ExploreCandidate> = Vec::new();
+    for d in 1..=max_depth {
+        if frontier.is_empty() {
+            break;
+        }
+        let mut next_qns: Vec<String> = Vec::new();
+        for outgoing in [true, false] {
+            let hop = explore_hop(db, &label, &key, &frontier, outgoing);
+            for (rel, lbls, qn) in hop {
+                if !visited.insert(qn.clone()) {
+                    continue;
+                }
+                discovered.push(ExploreCandidate {
+                    qn: qn.clone(),
+                    label: lbls,
+                    depth: d,
+                    via_rel: rel,
+                    via_outgoing: outgoing,
+                    deg: 0,
+                    has_notes: false,
+                    has_mentions: false,
+                });
+                next_qns.push(qn);
+            }
+        }
+        frontier = next_qns;
+    }
+
+    if !discovered.is_empty() {
+        let qns: Vec<String> = discovered.iter().map(|c| c.qn.clone()).collect();
+        let in_list = qns
+            .iter()
+            .map(|s| escape_str(s))
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let deg_q = format!(
+            "MATCH (m) WHERE m.qualified_name IN [{in_list}] \
+             OPTIONAL MATCH (m)-[r]-() \
+             RETURN m.qualified_name AS qn, count(r) AS deg"
+        );
+        let mut deg_map: BTreeMap<String, i64> = BTreeMap::new();
+        if let Ok(t) = db.query(&deg_q) {
+            for row in &t.rows {
+                if let Some(qn) = row.first().and_then(|c| c.as_str()) {
+                    let d = row.get(1).and_then(|c| c.as_i64()).unwrap_or(0);
+                    deg_map.insert(qn.to_string(), d);
+                }
+            }
+        }
+
+        let notes_q = format!(
+            "MATCH (m)<-[:NOTES]-(:Note) WHERE m.qualified_name IN [{in_list}] \
+             RETURN DISTINCT m.qualified_name AS qn"
+        );
+        let mut notes_set: BTreeSet<String> = BTreeSet::new();
+        if let Ok(t) = db.query(&notes_q) {
+            for row in &t.rows {
+                if let Some(qn) = row.first().and_then(|c| c.as_str()) {
+                    notes_set.insert(qn.to_string());
+                }
+            }
+        }
+
+        let men_q = format!(
+            "MATCH (m)<-[:MENTIONS]-(:DocSection) WHERE m.qualified_name IN [{in_list}] \
+             RETURN DISTINCT m.qualified_name AS qn"
+        );
+        let mut men_set: BTreeSet<String> = BTreeSet::new();
+        if let Ok(t) = db.query(&men_q) {
+            for row in &t.rows {
+                if let Some(qn) = row.first().and_then(|c| c.as_str()) {
+                    men_set.insert(qn.to_string());
+                }
+            }
+        }
+
+        for c in &mut discovered {
+            c.deg = deg_map.get(&c.qn).copied().unwrap_or(0);
+            c.has_notes = notes_set.contains(&c.qn);
+            c.has_mentions = men_set.contains(&c.qn);
+        }
+    }
+
+    discovered.sort_by(|a, b| {
+        b.score()
+            .partial_cmp(&a.score())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "# Explore: `:{label} {{{key}: {value:?}}}` (budget {char_budget} chars, depth ≤ {max_depth})\n\n"
+    ));
+    out.push_str("## Seed\n\n```json\n");
+    out.push_str(&seed_props);
+    if !seed_props.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str("```\n\n");
+    out.push_str(&format!(
+        "## Neighbourhood (ranked, BFS up to depth {max_depth})\n\n"
+    ));
+
+    let total = discovered.len();
+    let mut included = 0usize;
+    for c in &discovered {
+        let line = c.render_line();
+        let footer_reserve = 160;
+        if out.len() + line.len() + footer_reserve >= char_budget {
+            break;
+        }
+        out.push_str(&line);
+        out.push('\n');
+        included += 1;
+    }
+    if total == 0 {
+        out.push_str("_(no neighbours within depth)_\n");
+    }
+    out.push('\n');
+    let dropped = total.saturating_sub(included);
+    let used = out.len();
+    out.push_str(&format!(
+        "_Showed {included}/{total} candidates · used ~{used}/{char_budget} chars · {dropped} dropped (raise `char_budget` or `max_depth` to see more)._"
+    ));
+
+    ok_text(out)
 }
 
 // ── coverage_md ───────────────────────────────────────────────────────────────
@@ -3129,6 +3428,7 @@ fn main() {
                     "define_concept" => handle_define_concept(&db, params),
                     "concept" => handle_concept(&db, params),
                     "coverage_md" => handle_coverage_md(&db, params),
+                    "explore" => handle_explore(&db, params),
                     "list_concepts" => handle_list_concepts(&db),
                     "index_status" => handle_index_status(&status, watch_path.as_deref()),
                     "import_pr_notes" => handle_import_pr_notes(&db, params),
@@ -3184,6 +3484,7 @@ mod tests {
             "concept",
             "list_concepts",
             "coverage_md",
+            "explore",
             "index_status",
             "import_pr_notes",
             "watch",
@@ -3339,6 +3640,94 @@ mod tests {
         assert!(md.contains("`abcd1234`"), "{md}");
         assert!(md.contains("src/lib.rs"));
         assert!(md.contains("README.md"));
+    }
+
+    #[test]
+    fn explore_returns_seed_and_neighbours_within_budget() {
+        let db = Db::open_in_memory().unwrap();
+        db.run("CREATE (:Function {qualified_name: 'm::root', name: 'root'})")
+            .unwrap();
+        for n in ["a", "b", "c", "d", "e"] {
+            db.run(&format!(
+                "CREATE (:Function {{qualified_name: 'm::{n}', name: '{n}'}})"
+            ))
+            .unwrap();
+            db.run(&format!(
+                "MATCH (r:Function {{qualified_name: 'm::root'}}), \
+                       (n:Function {{qualified_name: 'm::{n}'}}) CREATE (r)-[:CALLS]->(n)"
+            ))
+            .unwrap();
+        }
+        // Make `m::a` a hub.
+        for tgt in ["b", "c", "d"] {
+            db.run(&format!(
+                "MATCH (a:Function {{qualified_name: 'm::a'}}), \
+                       (b:Function {{qualified_name: 'm::{tgt}'}}) CREATE (a)-[:CALLS]->(b)"
+            ))
+            .unwrap();
+        }
+
+        let v = handle_explore(
+            &db,
+            &json!({
+                "label": "Function", "key": "qualified_name", "value": "m::root",
+                "char_budget": 8000, "max_depth": 2
+            }),
+        );
+        let md = text_of(&v);
+        assert!(md.contains("# Explore:"), "{md}");
+        assert!(md.contains("## Seed"));
+        assert!(md.contains("Neighbourhood"));
+        let pos_a = md.find("m::a").expect("hub missing");
+        let pos_e = md.find("m::e").expect("leaf missing");
+        assert!(pos_a < pos_e, "hub should outrank leaf:\n{md}");
+        assert!(md.contains("Showed"));
+    }
+
+    #[test]
+    fn explore_respects_tight_budget_and_reports_drops() {
+        let db = Db::open_in_memory().unwrap();
+        db.run("CREATE (:Function {qualified_name: 'r::seed', name: 'seed'})")
+            .unwrap();
+        for i in 0..30 {
+            db.run(&format!(
+                "CREATE (:Function {{qualified_name: 'r::n{i}', name: 'n{i}'}})"
+            ))
+            .unwrap();
+            db.run(&format!(
+                "MATCH (s:Function {{qualified_name: 'r::seed'}}), \
+                       (n:Function {{qualified_name: 'r::n{i}'}}) CREATE (s)-[:CALLS]->(n)"
+            ))
+            .unwrap();
+        }
+        let md = text_of(&handle_explore(
+            &db,
+            &json!({
+                "label": "Function", "key": "qualified_name", "value": "r::seed",
+                "char_budget": 800, "max_depth": 1
+            }),
+        ));
+        assert!(
+            md.len() <= 1000,
+            "exceeded budget: {} bytes\n{md}",
+            md.len()
+        );
+        assert!(md.contains("dropped"));
+        let visible = (0..30).filter(|i| md.contains(&format!("r::n{i}"))).count();
+        assert!(
+            visible > 0 && visible < 30,
+            "expected partial truncation, got {visible}/30:\n{md}"
+        );
+    }
+
+    #[test]
+    fn explore_handles_unknown_seed() {
+        let db = Db::open_in_memory().unwrap();
+        let md = text_of(&handle_explore(
+            &db,
+            &json!({"label":"Function","key":"qualified_name","value":"nope"}),
+        ));
+        assert!(md.contains("# Not found"));
     }
 
     #[test]

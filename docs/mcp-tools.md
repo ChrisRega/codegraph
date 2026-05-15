@@ -11,6 +11,33 @@ short Cypher cheat-sheet. No arguments. Use this first when wiring up
 an LLM session — the result describes the graph the model is allowed to
 query.
 
+## `explore`
+
+Token-budgeted graph exploration. Identifies a seed node, BFS-walks
+outward up to `max_depth`, scores each discovered neighbour, then
+greedily fills a Markdown report from highest-scoring downward until
+`char_budget` is exhausted. The output footer reports how many
+candidates were dropped so the agent knows whether to raise the budget
+or pivot.
+
+The intended use: replace the multi-call pattern of
+`node_md(seed)` → `node_md(neighbour_1)` → `node_md(neighbour_2)` …
+with one bounded call.
+
+| arg | type | notes |
+| --- | --- | --- |
+| `label` | string, required | seed label (`Function`, `File`, …) |
+| `key`   | string, required | identifying property (`qualified_name`, `path`) |
+| `value` | string, required | property value of the seed |
+| `char_budget` | integer, optional | rough output ceiling, default `8000` |
+| `max_depth`   | integer, optional | BFS depth cap (default `2`, max `4`) |
+
+Scoring: `degree + 4·has_notes + 2·has_doc_mentions − 5·depth`. Higher
+fan-in nodes win, with a bonus for annotation. Each enrichment
+(degree, has_notes, has_mentions) is a single batched query keyed off
+all discovered qualified names, so the call is `1 + 2·max_depth + 3`
+DB round-trips regardless of subgraph size.
+
 ## `coverage_md`
 
 Single Markdown report surfacing the dim spots of the graph — the

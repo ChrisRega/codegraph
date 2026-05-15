@@ -6,6 +6,38 @@ Now with persistent LSP + live mode actually wired in this session, so
 the MCP tools are responsive enough to use as a primary navigation
 mechanism. Real experience reports below.
 
+### (10) explore — token-budgeted exploration
+
+- **No greps used at all** for this one. The handler shape is now
+  internalised from H1 (impact), H2 (find_symbol), H7 (concept), and
+  the previous coverage_md commit. The `escape_str` + `safe_ident` +
+  batched-IN-list patterns are muscle memory.
+- **One MCP tool that *would* have been useful while building this:**
+  `node_md` on the existing `handle_concept` to compare-and-contrast
+  the BFS-then-render shape. I went from memory which was fine, but a
+  visual diff between the two would have been faster than recalling.
+- **Scoring choices:** went with `degree + 4·notes + 2·mentions − 5·depth`.
+  The depth penalty (5×) intentionally crushes deeper-but-trivially-
+  connected nodes; the notes bonus (4×) intentionally over-weights
+  annotation, because annotated = "humans found this important
+  enough to write down". These coefficients are eyeballed, not
+  measured. Real validation would need real agent traces.
+- **Test design:** `explore_respects_tight_budget_and_reports_drops`
+  generates a 30-leaf star with an 800-char budget and asserts the
+  output stays under 1000 chars AND that the dropped-count footer is
+  emitted. The "stays under" assertion is loose (1000 vs the 800
+  budget) because the seed header + footer + truncation reserve eat
+  some headroom. Acceptable as a contract test.
+- **Dogfood gap I noticed:** `index_status` shows `runs_total: 23,
+  last_duration: 49s` while I was iterating. The watcher is
+  reindexing every save of `main.rs`. With persistent rust-analyzer
+  the per-pass time should drop further once my edit storm settles.
+  Worth adding a "long-batch warning" to the status output: if
+  consecutive runs exceed N seconds, surface a hint about scope
+  reduction or a more targeted path filter.
+- **Tests:** 3 new tests, mcp suite 38/38, workspace 66/66, clippy
+  clean.
+
 ### (12) coverage_md
 
 - **Reached for first:** `mcp__codegraph__find_symbol("handle_concept")`

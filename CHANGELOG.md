@@ -14,6 +14,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   single-file save left the whole codebase CALLS-less until the next
   full reindex. The wipe is now scoped to callers in the current pass,
   so unchanged files keep their call graph.
+- **`explore` MCP tool** — token-budgeted graph exploration. BFS from a
+  seed up to `max_depth`, score each candidate (`degree + 4·has_notes
+  + 2·has_doc_mentions − 5·depth`), greedily fill a Markdown report
+  until `char_budget` is exhausted, footer reports drops. Replaces the
+  multi-`node_md`-call pattern with one bounded call.
 - **`coverage_md` MCP tool** — single Markdown report of the graph's
   dim spots: orphan functions (no inbound `[:CALLS]`), untested
   functions ranked by `[:CALLS]` fan-in, files with no `:Note`s, and
