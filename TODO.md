@@ -116,7 +116,7 @@ for, with the lowest-token answer for each question shape.
   `:View {name, cypher}` node; `view(name, params)` runs it and
   returns Markdown. Reusable named queries with zero Cypher reasoning
   on the agent side.
-- [ ] **H4** — `diff_since(commit)`. Walk the `:GitCommit`
+- [x] **H4** — `diff_since(commit)`. Walk the `:GitCommit`
   `:PARENT_OF` DAG and list functions/files added/changed/removed
   since the given commit, as a Markdown table. PR-prep / changelog
   generator.

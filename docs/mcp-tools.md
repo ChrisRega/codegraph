@@ -131,6 +131,31 @@ to their `:Author` via the `[:AUTHORED]` edge.
 | --- | --- | --- |
 | `limit` | integer, optional | default `50` |
 
+## `diff_since`
+
+Reports what landed between a baseline `:GitCommit` and HEAD. HEAD is
+identified by the `[:SNAPSHOT_OF]->(:Workspace)` edge; the baseline is
+resolved against `c.hash` first, then `c.short_hash`. Lists commits in
+the open-closed interval `(baseline, HEAD]`, then `:File` and
+`:Function` whose `first_seen_commit` is one of those commits.
+
+| arg | type | notes |
+| --- | --- | --- |
+| `commit` | string, required | full hash or short_hash of the baseline |
+| `limit`  | integer, optional | per-category cap, default `50` |
+
+**Removals are not reported.** The indexer detaches deleted nodes on
+each pass and does not keep tombstones; reconstructing what existed at
+an older snapshot would require either tombstones or an external
+`git log -S<symbol>` cross-reference. The output includes a footer
+making this explicit so an LLM doesn't infer "no removals" from the
+absence of a Removed section.
+
+**Implementation note.** The baseline lookup is two `WHERE x = ?`
+queries instead of one `WHERE x = ? OR y = ?`, because velr 0.2.16's
+planner expands `OR` into a `UNION` that conflicts with the trailing
+`LIMIT`.
+
 ## `save_view`, `view`, `list_views`
 
 Persist reusable Cypher queries as `:View` nodes that survive `--full`

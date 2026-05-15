@@ -198,6 +198,18 @@ fn tool_list() -> Value {
                 }
             },
             {
+                "name": "diff_since",
+                "description": "Walk the `:GitCommit` `[:PARENT_OF]` DAG and report what changed between the given commit and HEAD. Lists commits in the range and the `:File` / `:Function` nodes whose `first_seen_commit` lands inside it (i.e. added during the range). Removals are not tracked because the indexer does not keep tombstones — see the note in `docs/mcp-tools.md`.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "commit": { "type": "string", "description": "Full hash or short_hash of the baseline commit." },
+                        "limit":  { "type": "integer", "description": "Max items per category (default 50)." }
+                    },
+                    "required": ["commit"]
+                }
+            },
+            {
                 "name": "save_view",
                 "description": "Persist a reusable Cypher query as a `:View` node. Future calls to `view(name, params)` re-run it. Use this for queries you find yourself running repeatedly (\"orphan steps\", \"public functions with no callers\"). The cypher may contain `$placeholder` tokens; `view` will substitute them at run time using `escape_str` on the supplied values.",
                 "inputSchema": {
@@ -907,6 +919,198 @@ fn handle_history(db: &Db, params: &Value) -> Value {
             .unwrap_or_default();
         out.push_str(&format!("| `{s}` | {ts} | {a} | {m} |\n"));
     }
+    ok_text(out.trim_end().to_string())
+}
+
+// ── diff_since ────────────────────────────────────────────────────────────────
+
+fn handle_diff_since(db: &Db, params: &Value) -> Value {
+    let given = match params.get("commit").and_then(|v| v.as_str()) {
+        Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+        _ => return err_text("missing required argument: commit".to_string()),
+    };
+    let limit = params
+        .get("limit")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(50)
+        .max(1);
+
+    let g_lit = escape_str(&given);
+    // velr's planner turns `WHERE x = a OR y = a` into a UNION which clashes
+    // with LIMIT placement, so try the two keys separately.
+    let try_lookup = |key: &str| -> Option<(String, String, String)> {
+        let q = format!(
+            "MATCH (c:GitCommit) WHERE c.{key} = {g_lit} \
+             RETURN c.hash AS hash, c.short_hash AS short, c.timestamp AS ts LIMIT 1"
+        );
+        let t = db.query(&q).ok()?;
+        let r = t.rows.into_iter().next()?;
+        let mut it = r.into_iter();
+        let h = it.next().and_then(|c| c.as_str().map(str::to_string))?;
+        let s = it
+            .next()
+            .and_then(|c| c.as_str().map(str::to_string))
+            .unwrap_or_default();
+        let ts = it
+            .next()
+            .and_then(|c| c.as_str().map(str::to_string))
+            .unwrap_or_default();
+        Some((h, s, ts))
+    };
+    let (given_hash, given_short, given_ts) =
+        match try_lookup("hash").or_else(|| try_lookup("short_hash")) {
+            Some(t) => t,
+            None => return ok_text(format!("_(no `:GitCommit` matches `{given}`)_")),
+        };
+
+    let head_q = "MATCH (h:GitCommit)-[:SNAPSHOT_OF]->(:Workspace) \
+                  RETURN h.hash AS hash, h.short_hash AS short, h.timestamp AS ts LIMIT 1";
+    let (head_hash, head_short, head_ts) = match db.query(head_q) {
+        Ok(t) if !t.rows.is_empty() => {
+            let r = &t.rows[0];
+            let h = r.first().and_then(|c| c.as_str()).unwrap_or("").to_string();
+            let s = r.get(1).and_then(|c| c.as_str()).unwrap_or("").to_string();
+            let ts = r.get(2).and_then(|c| c.as_str()).unwrap_or("").to_string();
+            (h, s, ts)
+        }
+        _ => {
+            return err_text(
+                "no HEAD `:GitCommit` (no `[:SNAPSHOT_OF]->(:Workspace)` edge) — was the indexer ever run?".to_string(),
+            )
+        }
+    };
+
+    let gt_lit = escape_str(&given_ts);
+    let ht_lit = escape_str(&head_ts);
+
+    // Commits strictly newer than the baseline up to and including HEAD.
+    let range_q = format!(
+        "MATCH (c:GitCommit) WHERE c.timestamp > {gt_lit} AND c.timestamp <= {ht_lit} \
+         OPTIONAL MATCH (a:Author)-[:AUTHORED]->(c) \
+         RETURN c.hash AS hash, c.short_hash AS short, c.timestamp AS ts, \
+                a.name AS author, c.message AS msg \
+         ORDER BY c.timestamp"
+    );
+    let range = match db.query(&range_q) {
+        Ok(t) => t,
+        Err(e) => return err_text(format!("range query failed: {e}")),
+    };
+    let range_hashes: Vec<String> = range
+        .rows
+        .iter()
+        .filter_map(|r| r.first().and_then(|c| c.as_str()).map(|s| s.to_string()))
+        .collect();
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "# Diff since `{given_short}` → HEAD `{head_short}`\n\n"
+    ));
+    out.push_str(&format!(
+        "_Baseline `{given_hash}` ({given_ts})_  \n_HEAD `{head_hash}` ({head_ts})_\n\n"
+    ));
+
+    if range_hashes.is_empty() {
+        out.push_str("No commits between baseline and HEAD.\n");
+        return ok_text(out.trim_end().to_string());
+    }
+
+    out.push_str(&format!("## Commits in range ({})\n\n", range_hashes.len()));
+    out.push_str("| short | timestamp | author | message |\n| --- | --- | --- | --- |\n");
+    let s_i = range.col("short");
+    let ts_i = range.col("ts");
+    let a_i = range.col("author");
+    let m_i = range.col("msg");
+    for row in range.rows.iter().take(limit as usize) {
+        let s = s_i
+            .and_then(|i| row.get(i))
+            .map(md_cell)
+            .unwrap_or_default();
+        let ts = ts_i
+            .and_then(|i| row.get(i))
+            .map(md_cell)
+            .unwrap_or_default();
+        let a = a_i
+            .and_then(|i| row.get(i))
+            .map(md_cell)
+            .unwrap_or_default();
+        let m = m_i
+            .and_then(|i| row.get(i))
+            .map(md_cell)
+            .unwrap_or_default();
+        out.push_str(&format!("| `{s}` | {ts} | {a} | {m} |\n"));
+    }
+    if range_hashes.len() > limit as usize {
+        out.push_str(&format!(
+            "_… {} more (raise `limit`)_\n",
+            range_hashes.len() - limit as usize
+        ));
+    }
+    out.push('\n');
+
+    let in_list = range_hashes
+        .iter()
+        .map(|h| escape_str(h))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    let added_section = |label: &str, key: &str, alias: &str| -> String {
+        let q = format!(
+            "MATCH (n:{label}) WHERE n.first_seen_commit IN [{in_list}] \
+             RETURN n.{key} AS {alias}, n.first_seen_commit AS first \
+             ORDER BY n.{key} LIMIT {limit_x}",
+            limit_x = limit + 1
+        );
+        let mut s = String::new();
+        match db.query(&q) {
+            Ok(t) => {
+                if t.rows.is_empty() {
+                    s.push_str(&format!("## Added `:{label}` (0)\n\n_(none)_\n\n"));
+                } else {
+                    let total = t.rows.len();
+                    let truncated = total > limit as usize;
+                    let shown = (limit as usize).min(total);
+                    s.push_str(&format!(
+                        "## Added `:{label}` ({}{})\n\n",
+                        if truncated { ">=" } else { "" },
+                        total
+                    ));
+                    s.push_str("| identifier | first_seen_commit |\n| --- | --- |\n");
+                    for row in t.rows.iter().take(shown) {
+                        let id = row
+                            .first()
+                            .and_then(|c| c.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let f = row
+                            .get(1)
+                            .and_then(|c| c.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let f_short = if f.len() > 8 { &f[..8] } else { &f };
+                        s.push_str(&format!("| `{id}` | `{f_short}` |\n"));
+                    }
+                    if truncated {
+                        s.push_str("_… more (raise `limit`)_\n");
+                    }
+                    s.push('\n');
+                }
+            }
+            Err(e) => {
+                s.push_str(&format!("## Added `:{label}`\n\n_(query failed: {e})_\n\n"));
+            }
+        }
+        s
+    };
+
+    out.push_str(&added_section("File", "path", "id"));
+    out.push_str(&added_section("Function", "qualified_name", "id"));
+
+    out.push_str(
+        "> Removals are **not** listed: the indexer detaches deleted nodes \
+         on each pass and does not keep tombstones. To detect a removal, \
+         compare two snapshots externally (e.g. `git log -S<symbol>`).\n",
+    );
+
     ok_text(out.trim_end().to_string())
 }
 
@@ -1706,6 +1910,7 @@ fn main() {
                     "save_view" => handle_save_view(&db, params),
                     "view" => handle_view(&db, params),
                     "list_views" => handle_list_views(&db),
+                    "diff_since" => handle_diff_since(&db, params),
                     other => err_text(format!("unknown tool: {other}")),
                 };
                 response(&req.id, content)
@@ -1750,6 +1955,7 @@ mod tests {
             "save_view",
             "view",
             "list_views",
+            "diff_since",
         ] {
             assert!(names.contains(&expected), "missing tool: {expected}");
         }
@@ -1936,6 +2142,66 @@ mod tests {
         // b's callers: a, e
         assert!(md.contains("x::a"));
         assert!(md.contains("x::e"));
+    }
+
+    #[test]
+    fn diff_since_lists_commits_and_added_nodes() {
+        let db = Db::open_in_memory().unwrap();
+        // Three commits in chronological order.
+        for (h, sh, ts, msg) in [
+            ("aaa1aaa1", "aaa1aaa", "2026-01-01T00:00:00Z", "first"),
+            ("bbb2bbb2", "bbb2bbb", "2026-01-02T00:00:00Z", "second"),
+            ("ccc3ccc3", "ccc3ccc", "2026-01-03T00:00:00Z", "third"),
+        ] {
+            db.run(&format!(
+                "CREATE (:GitCommit {{hash: '{h}', short_hash: '{sh}', \
+                 timestamp: '{ts}', message: '{msg}'}})"
+            ))
+            .unwrap();
+        }
+        // Workspace + SNAPSHOT_OF on HEAD (ccc3).
+        db.run("CREATE (:Workspace {name: 'ws'})").unwrap();
+        db.run(
+            "MATCH (c:GitCommit {hash: 'ccc3ccc3'}), (w:Workspace) \
+             CREATE (c)-[:SNAPSHOT_OF]->(w)",
+        )
+        .unwrap();
+        // Functions with first_seen at different commits.
+        db.run("CREATE (:Function {qualified_name: 'old::a', first_seen_commit: 'aaa1aaa1'})")
+            .unwrap();
+        db.run("CREATE (:Function {qualified_name: 'mid::b', first_seen_commit: 'bbb2bbb2'})")
+            .unwrap();
+        db.run("CREATE (:Function {qualified_name: 'new::c', first_seen_commit: 'ccc3ccc3'})")
+            .unwrap();
+        // File added at bbb.
+        db.run("CREATE (:File {path: 'src/new.rs', first_seen_commit: 'bbb2bbb2'})")
+            .unwrap();
+
+        let v = handle_diff_since(&db, &json!({ "commit": "aaa1aaa" }));
+        let md = text_of(&v);
+        // commits in range: bbb + ccc (not aaa itself; baseline excluded).
+        assert!(md.contains("bbb2bbb"), "got {md}");
+        assert!(md.contains("ccc3ccc"));
+        // added Functions: mid::b and new::c, but NOT old::a
+        assert!(md.contains("mid::b"));
+        assert!(md.contains("new::c"));
+        assert!(!md.contains("old::a"));
+        // added File
+        assert!(md.contains("src/new.rs"));
+        // tombstone caveat present
+        assert!(md.contains("Removals are"));
+    }
+
+    #[test]
+    fn diff_since_unknown_commit_returns_message() {
+        let db = Db::open_in_memory().unwrap();
+        db.run("CREATE (:GitCommit {hash: 'aaa', short_hash: 'aaa', timestamp: '2026-01-01T00:00:00Z'})").unwrap();
+        db.run("CREATE (:Workspace {name: 'ws'})").unwrap();
+        db.run("MATCH (c:GitCommit), (w:Workspace) CREATE (c)-[:SNAPSHOT_OF]->(w)")
+            .unwrap();
+        let v = handle_diff_since(&db, &json!({ "commit": "zzznope" }));
+        let md = text_of(&v);
+        assert!(md.contains("no `:GitCommit` matches"), "got {md}");
     }
 
     #[test]

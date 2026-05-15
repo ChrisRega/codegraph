@@ -8,6 +8,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`diff_since` MCP tool** — walks the `:GitCommit` DAG between a
+  baseline commit and HEAD, listing commits in range and `:File` /
+  `:Function` nodes whose `first_seen_commit` lands inside it.
+  Removals are not tracked (no tombstones); the output footer makes
+  this explicit.
 - **Saved views** — `save_view`, `view`, `list_views` MCP tools.
   Cypher queries are persisted as `:View` nodes (survive `--full`
   reindex), parameterised with `$tokens` that get substituted at run

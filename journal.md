@@ -108,3 +108,36 @@ Each entry: feature, what I reached for, what I wished existed.
   unknown-token passthrough), `save_view_then_view_runs_with_params`
   (round-trip + appears in `list_views`), `view_unknown_name_…`,
   `save_view_rejects_invalid_name`. mcp suite 20/20.
+
+## H4 — `diff_since`
+
+- **Reached for:** `grep -n 'first_seen\|last_seen\|DETACH DELETE...'`
+  on the indexer to confirm the data shape before designing the diff.
+  Critical because my first instinct ("just list removed nodes") was
+  wrong: the indexer doesn't keep tombstones — removed `:Function`s
+  are gone from the graph entirely. The grep saved me from shipping a
+  query that would always return zero removals while pretending to
+  enumerate them.
+- **velr surprise #1:** `WHERE c.hash = $g OR c.short_hash = $g …
+  LIMIT 1` errors with `LIMIT clause should come after UNION not
+  before`. velr's planner rewrites `OR` into a `UNION`, and the
+  combined parse rejects a leading `LIMIT`. Workaround: two sequential
+  `WHERE x = ?` queries with `or_else`. Worth noting in
+  `docs/velr-notes.md` (deferred — not in this commit's scope).
+- **Honesty in the output:** the report includes a footer stating
+  removals aren't tracked. An LLM reading the dossier would otherwise
+  infer "no Removed section ⇒ nothing was removed", which is false.
+  Negative-evidence framing is part of the API surface here.
+- **Bug bounce:** the `format!("…literal…")` in `added_section`
+  triggered `clippy::useless_format`. Fixed by switching to a bare
+  `&str`. Reminder to *always* run clippy in the test loop, not just
+  fmt+test.
+- **Wish #5:** the indexer should write a per-commit `(:GitCommit)
+  -[:ADDED]->(:Function)` and `[:REMOVED]->` edge alongside the
+  current first/last_seen properties. That would make `diff_since`
+  precise and would unlock a "function lifespan" view. Big change —
+  punted to `future-ideas.md` material.
+- **Tests:** `diff_since_lists_commits_and_added_nodes` (3-commit
+  setup, asserts only mid + new functions show up in the range while
+  the pre-baseline `old::a` is excluded), and
+  `diff_since_unknown_commit_returns_message`. mcp suite 22/22.
