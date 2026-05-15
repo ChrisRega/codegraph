@@ -188,6 +188,38 @@ Each entry: feature, what I reached for, what I wished existed.
   test that asserts on a static value without calling anything won't
   produce edges. Doc says so. A future pass could attribute test
   effects via macro expansion, but that's a different project.
+## H8 — Auto-notes from PR comments
+
+- **Reached for:** zero greps. The `:Note` write pattern from G2 is
+  fully internalised at this point.
+- **Surprise (mine, not velr's):** lost five queued Edit calls when
+  `cargo fmt` rewrote `main.rs` between the previous commit and this
+  step. The Edit tool requires file-state-since-read, and my new
+  edits had been queued against a pre-fmt snapshot. Recovered by
+  re-grepping anchors and re-applying. **Lesson:** when bundling
+  fmt+test+clippy in one command at a feature boundary, consider
+  *not* queuing dependent edits across the boundary, or accept the
+  re-application cost.
+- **Bug bounce:** my first cut filtered tokens before stripping the
+  trailing `()`, so `foo()` was rejected because it contained `()`.
+  Test caught it on the first run with `["foo", "Baz"]` instead of
+  the expected three. Fixed by trimming first, then validating.
+  Reads-too-literally bug, classic.
+- **Honest scope:** the symbol matcher is "any backticked identifier
+  that exists in the graph as a `Function.name` or
+  `Function.qualified_name`". It will miss inline plain-text
+  references and won't disambiguate when `foo` exists in two
+  modules. Both are documented.
+- **Wish #8:** the `gh` shellout layer should live in a tiny separate
+  binary so the MCP server stays gh-free. Right now the agent is
+  expected to fetch the JSON and pass it in. Acceptable, but a
+  `codegraph-pr-notes <pr#>` convenience would be nice. Punted.
+- **Tests:** `extract_backticked_symbols_strips_calls_and_codeblocks`
+  (5-symbol mixed body, asserts fenced contents skipped and `foo()`
+  matches `foo`), and `import_pr_notes_attaches_to_matching_function`
+  (3 comments → 1 note attached to 2 functions, surfaces in the
+  function's `node_md` dossier). mcp suite 27/27.
+
 ## H7 — `:Concept` layer
 
 - **Reached for:** zero greps. The shape is a copy-paste of the H3

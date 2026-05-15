@@ -8,6 +8,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`import_pr_notes` MCP tool** — bulk-imports PR / code-review
+  comments as `:Note` nodes attached to any `:Function` they
+  reference. Pulls every backtick-delimited identifier from each
+  comment body, looks it up against `Function.name` and
+  `Function.qualified_name`, and if any match, attaches one note to
+  all matched functions with `tags='pr-comment'`. Pairs naturally
+  with `gh pr view --json comments`.
 - **`:Concept` layer** — user-curated subsystem labels with
   `define_concept`, `concept`, `list_concepts` MCP tools. A
   `:Concept` connects to its members via `[:DESCRIBES]`; the

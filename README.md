@@ -115,6 +115,7 @@ into an LLM reply, plus a `:Note` mechanism for persisting findings:
 | `save_view` / `view` / `list_views` | persist + replay parameterised Cypher queries as `:View` nodes |
 | `diff_since` | what landed between a baseline commit and HEAD |
 | `define_concept` / `concept` / `list_concepts` | user-curated subsystem dossiers (members + mentioned fns + tests + notes) |
+| `import_pr_notes` | turn PR/code-review comments into `:Note`s on referenced functions |
 | `begin` / `write` / `commit` / `rollback` | buffered transactions |
 | `explain` | velr planner trace |
 

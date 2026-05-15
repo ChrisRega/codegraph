@@ -130,7 +130,7 @@ for, with the lowest-token answer for each question shape.
 - [x] **H7** — `:Concept` layer. Cluster `:DocSection`s into
   `:Concept`s; expose `concept(name)` returning a subsystem dossier
   (functions + docs + tests + open notes).
-- [ ] **H8** — Auto-notes from PR comments. `gh pr view --comments`
+- [x] **H8** — Auto-notes from PR comments. `gh pr view --comments`
   parsed into `:Note`s attached to referenced symbols. Long-term
   memory from existing review activity.
 - [ ] **H9** — `watch_node` triggers. Mark a node as watched; the next

@@ -139,6 +139,33 @@ to their `:Author` via the `[:AUTHORED]` edge.
 | --- | --- | --- |
 | `limit` | integer, optional | default `50` |
 
+## `import_pr_notes`
+
+Bulk-imports a list of PR / code-review comments as `:Note` nodes
+attached to any `:Function` they reference.
+
+For each comment, every backtick-delimited token in the body that looks
+like an identifier (`[A-Za-z0-9_:.]+`, ≤ 120 chars, optional trailing
+`()` stripped) is looked up against `Function.name` *and*
+`Function.qualified_name`. Tokens inside fenced ``` ``` ``` blocks are
+skipped. If at least one `:Function` matches, one `:Note` is created
+with `tags='pr-comment'` and attached to *all* matched functions via
+`[:NOTES]`.
+
+| arg | type | notes |
+| --- | --- | --- |
+| `comments` | array, required | each item: `{author, body, url}` (extra fields ignored) |
+| `pr` | string, optional | used in note title and id; defaults to `unknown` |
+
+Suggested workflow:
+
+```bash
+gh pr view 42 --json comments,number \
+  | jq '{pr: (.number|tostring), comments: .comments}' \
+  > /tmp/comments.json
+# then call import_pr_notes with that JSON
+```
+
 ## `define_concept`, `concept`, `list_concepts`
 
 User-curated subsystem labels. A `:Concept` is a node with a name and

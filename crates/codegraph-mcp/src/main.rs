@@ -198,6 +198,22 @@ fn tool_list() -> Value {
                 }
             },
             {
+                "name": "import_pr_notes",
+                "description": "Import a list of PR / code-review comments as `:Note` nodes attached to any `:Function` they reference. Backticked tokens in each `body` are looked up against `Function.name` and `Function.qualified_name`; matching targets all get the same note attached. Suggested workflow: feed the output of `gh pr view <n> --json comments` into the `comments` argument.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "pr":       { "type": "string", "description": "PR identifier, used in the note title and id." },
+                        "comments": {
+                            "type": "array",
+                            "description": "Array of `{author, body, url}` objects (extra fields ignored).",
+                            "items": { "type": "object" }
+                        }
+                    },
+                    "required": ["comments"]
+                }
+            },
+            {
                 "name": "define_concept",
                 "description": "Create or update a `:Concept` node and attach `[:DESCRIBES]` edges to every node bound by the supplied MATCH clause (which must bind a variable `t`). Concepts are user-curated subsystem labels — once defined, `concept(name)` returns a full dossier (members + mentioned functions + tests + notes).",
                 "inputSchema": {
@@ -1011,6 +1027,157 @@ fn handle_history(db: &Db, params: &Value) -> Value {
         out.push_str(&format!("| `{s}` | {ts} | {a} | {m} |\n"));
     }
     ok_text(out.trim_end().to_string())
+}
+
+// ── import_pr_notes ───────────────────────────────────────────────────────────
+
+/// Extract backtick-delimited tokens from `body`. Tokens longer than 120
+/// chars (almost certainly fenced code blocks) and tokens that don't look
+/// like identifiers are dropped. Handles ```…``` blocks by skipping their
+/// contents entirely.
+fn extract_backticked_symbols(body: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let bytes = body.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'`' {
+            i += 1;
+            continue;
+        }
+        // Triple backtick ⇒ skip to the matching closer.
+        if bytes.get(i + 1) == Some(&b'`') && bytes.get(i + 2) == Some(&b'`') {
+            if let Some(rel_end) = body[i + 3..].find("```") {
+                i = i + 3 + rel_end + 3;
+            } else {
+                break;
+            }
+            continue;
+        }
+        // Single backtick ⇒ find next single backtick.
+        if let Some(rel_end) = body[i + 1..].find('`') {
+            let raw = &body[i + 1..i + 1 + rel_end];
+            // Strip a trailing `()` so `foo()` becomes `foo` before validation.
+            let token = raw.trim_end_matches("()");
+            if !token.is_empty()
+                && token.len() <= 120
+                && token
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':' || c == '.')
+            {
+                out.push(token.to_string());
+            }
+            i = i + 1 + rel_end + 1;
+        } else {
+            break;
+        }
+    }
+    out
+}
+
+fn lookup_function_targets(db: &Db, symbol: &str) -> Vec<String> {
+    use std::collections::BTreeSet;
+    let mut hits: BTreeSet<String> = BTreeSet::new();
+    let s_lit = escape_str(symbol);
+    for key in ["name", "qualified_name"] {
+        let q = format!(
+            "MATCH (f:Function) WHERE f.{key} = {s_lit} \
+             RETURN f.qualified_name AS qn LIMIT 10"
+        );
+        if let Ok(t) = db.query(&q) {
+            for row in &t.rows {
+                if let Some(qn) = row.first().and_then(|c| c.as_str()) {
+                    hits.insert(qn.to_string());
+                }
+            }
+        }
+    }
+    hits.into_iter().collect()
+}
+
+fn handle_import_pr_notes(db: &Db, params: &Value) -> Value {
+    let pr = params
+        .get("pr")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let comments = match params.get("comments").and_then(|v| v.as_array()) {
+        Some(a) => a,
+        None => return err_text("missing required argument: comments (array)".into()),
+    };
+
+    let mut comments_processed = 0usize;
+    let mut notes_created = 0usize;
+    let mut total_attached = 0usize;
+    let mut symbols_seen = 0usize;
+    let now_base = chrono_now_iso();
+
+    for (idx, c) in comments.iter().enumerate() {
+        let body = c.get("body").and_then(|v| v.as_str()).unwrap_or("");
+        let author = c.get("author").and_then(|v| v.as_str()).unwrap_or("github");
+        let url = c.get("url").and_then(|v| v.as_str()).unwrap_or("");
+        if body.trim().is_empty() {
+            continue;
+        }
+        comments_processed += 1;
+        let symbols = extract_backticked_symbols(body);
+        if symbols.is_empty() {
+            continue;
+        }
+        symbols_seen += symbols.len();
+        use std::collections::BTreeSet;
+        let mut targets: BTreeSet<String> = BTreeSet::new();
+        for s in &symbols {
+            for qn in lookup_function_targets(db, s) {
+                targets.insert(qn);
+            }
+        }
+        if targets.is_empty() {
+            continue;
+        }
+
+        let note_id = format!(
+            "pr-{}-{}-{}",
+            pr.replace(['/', '#', ' '], "_"),
+            idx,
+            now_base.replace([':', '.'], "-")
+        );
+        let title = format!("PR {pr} — {author}");
+        let md = if url.is_empty() {
+            body.to_string()
+        } else {
+            format!("{body}\n\n[source]({url})")
+        };
+        let upsert = format!(
+            "MERGE (n:Note {{id: {id}}}) \
+             SET n.title = {title}, n.author = {author}, n.tags = 'pr-comment', \
+                 n.created_at = {now}, n.markdown = {md}",
+            id = escape_str(&note_id),
+            title = escape_str(&title),
+            author = escape_str(author),
+            now = escape_str(&now_base),
+            md = escape_str(&md),
+        );
+        if db.run(&upsert).is_err() {
+            continue;
+        }
+        notes_created += 1;
+        for qn in &targets {
+            let q = format!(
+                "MATCH (n:Note {{id: {id}}}), (t:Function {{qualified_name: {qn}}}) \
+                 MERGE (n)-[:NOTES]->(t)",
+                id = escape_str(&note_id),
+                qn = escape_str(qn),
+            );
+            if db.run(&q).is_ok() {
+                total_attached += 1;
+            }
+        }
+    }
+
+    ok_text(format!(
+        "Processed {comments_processed} comments, scanned {symbols_seen} backticked tokens, \
+         created {notes_created} notes attached to {total_attached} `:Function` targets."
+    ))
 }
 
 // ── concepts ──────────────────────────────────────────────────────────────────
@@ -2270,6 +2437,7 @@ fn main() {
                     "define_concept" => handle_define_concept(&db, params),
                     "concept" => handle_concept(&db, params),
                     "list_concepts" => handle_list_concepts(&db),
+                    "import_pr_notes" => handle_import_pr_notes(&db, params),
                     other => err_text(format!("unknown tool: {other}")),
                 };
                 response(&req.id, content)
@@ -2318,6 +2486,7 @@ mod tests {
             "define_concept",
             "concept",
             "list_concepts",
+            "import_pr_notes",
         ] {
             assert!(names.contains(&expected), "missing tool: {expected}");
         }
@@ -2545,6 +2714,46 @@ mod tests {
         // b's callers: a, e
         assert!(md.contains("x::a"));
         assert!(md.contains("x::e"));
+    }
+
+    #[test]
+    fn extract_backticked_symbols_strips_calls_and_codeblocks() {
+        let body = "Looking at `foo` and `a::bar()`. Don't include\n```\n`fenced::not_a_symbol`\n```\nbut keep `Baz`.";
+        let syms = extract_backticked_symbols(body);
+        assert!(syms.contains(&"foo".to_string()), "{syms:?}");
+        assert!(syms.contains(&"a::bar".to_string()), "{syms:?}");
+        assert!(syms.contains(&"Baz".to_string()), "{syms:?}");
+        assert!(
+            !syms.iter().any(|s| s.contains("fenced")),
+            "fenced block leaked: {syms:?}"
+        );
+    }
+
+    #[test]
+    fn import_pr_notes_attaches_to_matching_function() {
+        let db = seed_db();
+        let v = handle_import_pr_notes(
+            &db,
+            &json!({
+                "pr": "42",
+                "comments": [
+                    { "author": "alice", "body": "I think `foo` calls `bar` redundantly here.", "url": "https://example/c/1" },
+                    { "author": "bob", "body": "totally unrelated chatter, nothing to see" },
+                    { "author": "carol", "body": "see also `does_not_exist` for reference" }
+                ]
+            }),
+        );
+        let txt = text_of(&v);
+        assert!(txt.contains("Processed 3 comments"), "got {txt}");
+        assert!(txt.contains("created 1 notes"), "got {txt}");
+        assert!(txt.contains("attached to 2"), "got {txt}");
+
+        let dossier = text_of(&handle_node_md(
+            &db,
+            &json!({ "label": "Function", "key": "qualified_name", "value": "a::foo" }),
+        ));
+        assert!(dossier.contains("PR 42 — alice"), "{dossier}");
+        assert!(dossier.contains("redundantly"));
     }
 
     #[test]
