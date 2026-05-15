@@ -98,6 +98,49 @@ Strike through (`~~text~~`) when done.
   `codegraph` MCP tools over `grep`/`find` and to persist findings as
   notes.
 
+## H. LLM-facing depth (in flight)
+
+These build directly on the G-series Markdown / Notes / revision
+foundation. Goal: make `codegraph` the *first* thing the agent reaches
+for, with the lowest-token answer for each question shape.
+
+- [ ] **H1** — `impact` MCP tool. Transitive blast radius of a node
+  via `CALLS*`, `IMPLEMENTED_BY`, `MENTIONS`, `DEFINED_IN`. Returns a
+  Markdown report with counts per category and the top-N affected
+  nodes. Replaces the "who uses this" crawl before refactors.
+- [ ] **H2** — `find_symbol(query)`. Fuzzy / substring lookup over
+  `:Function` / `:Symbol` qualified names returning a Markdown table of
+  `qualified_name`, `file:line`, `signature`. The graph equivalent of
+  ⌘-T.
+- [ ] **H3** — Saved views. `save_view(name, cypher)` MERGEs a
+  `:View {name, cypher}` node; `view(name, params)` runs it and
+  returns Markdown. Reusable named queries with zero Cypher reasoning
+  on the agent side.
+- [ ] **H4** — `diff_since(commit)`. Walk the `:GitCommit`
+  `:PARENT_OF` DAG and list functions/files added/changed/removed
+  since the given commit, as a Markdown table. PR-prep / changelog
+  generator.
+- [ ] **H5** — Ranked neighbours in `node_md`. Sort outgoing /
+  incoming edges by importance (fan-in/out, recent commit churn) and
+  cap at top-N per edge type. Hubs no longer blow up the dossier.
+- [ ] **H6** — `:Test` label + `[:TESTS]` edge. Discover Rust
+  `#[test]` / `#[tokio::test]` functions and link them to the
+  function-under-test where derivable. Enables "what changed without
+  test coverage" queries.
+- [ ] **H7** — `:Concept` layer. Cluster `:DocSection`s into
+  `:Concept`s; expose `concept(name)` returning a subsystem dossier
+  (functions + docs + tests + open notes).
+- [ ] **H8** — Auto-notes from PR comments. `gh pr view --comments`
+  parsed into `:Note`s attached to referenced symbols. Long-term
+  memory from existing review activity.
+- [ ] **H9** — `watch_node` triggers. Mark a node as watched; the next
+  indexer run writes a `:Note` describing what changed, so the agent
+  is notified asynchronously across sessions.
+
+More ambitious follow-ups (token-budgeted explore, reverse-Markdown
+round-trip, coverage heatmap, cross-repo federation, MCP Resources)
+live in [`future-ideas.md`](future-ideas.md).
+
 ## What's left
 
 The remaining open items are:
@@ -106,6 +149,7 @@ The remaining open items are:
 - **C5** — needs an installed Rust 1.75 toolchain to verify locally;
   CI does verify on every push.
 - **F2** / **F3** — pure nice-to-haves, not blockers.
+- **H1**–**H9** — see section above.
 
 Everything else is done. `cargo build --workspace`,
 `cargo test --workspace` (37 tests), `cargo fmt --all -- --check` and
