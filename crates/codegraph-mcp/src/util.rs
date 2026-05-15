@@ -29,6 +29,17 @@ pub fn safe_ident(s: &str) -> bool {
         && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// Looser identifier check — allows dashes too. Used for
+/// user-curated names (saved views, concepts) that go into a `name`
+/// property, never directly into Cypher syntax. Capped at 80 chars
+/// because longer names defeat the dossier point.
+pub fn safe_name_with_dashes(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 80
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
 /// Pull `label` / `key` / `value` out of an MCP `tools/call` `arguments`
 /// object, validating `label` and `key` against [`safe_ident`].
 pub fn parse_node_address(params: &Value) -> Result<(String, String, String), String> {

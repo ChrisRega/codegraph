@@ -137,20 +137,77 @@ for, with the lowest-token answer for each question shape.
   indexer run writes a `:Note` describing what changed, so the agent
   is notified asynchronously across sessions.
 
-More ambitious follow-ups (token-budgeted explore, reverse-Markdown
-round-trip, coverage heatmap, cross-repo federation, MCP Resources)
-live in [`future-ideas.md`](future-ideas.md).
+## I. Live indexing & MCP plumbing (post-H)
+
+- [x] **I1** — `codegraph-indexer` library refactor.
+  `pub fn run_indexer(opts: IndexOptions) -> Result<IndexStats, String>`
+  is the entry point; `main.rs` is a ~60 LoC CLI wrapper. Embedders
+  call `IndexOptions::new(workspace, db).with_paths(rel_paths)` for
+  live-mode reindexing.
+- [x] **I2** — `--watch <workspace>` mode for `codegraph-mcp`. Spawns a
+  `notify`-based filesystem watcher in a background thread. Debounced
+  (default 500ms) reindex of only the changed paths. Live mode skips
+  git history and the sidecar — the persistent revision history only
+  advances on actual `git commit`.
+- [x] **I3** — Persistent `LspPool` reused across watch passes. Each
+  language server pays its cold-start cost (~5s rust-analyzer init
+  + 15s workspace index) on the first batch only; subsequent batches
+  reuse the live process, send `didChange` for known files, and skip
+  most of the warm-up sleep. `index_status` exposes `live_lsps`.
+- [x] **I4** — `index_status` MCP tool. `state` / `last_run_at` /
+  `last_run_mode` / `last_run_duration_ms` / `head_hash` /
+  `last_paths` / `last_error`. Lets the agent wait for `idle` after a
+  save before issuing fresh queries.
+- [x] **I5** — Per-pass `[:CALLS]` scoping (bug fix). The
+  unconditional global `[:CALLS]` wipe nuked the whole call graph on
+  every incremental pass; now scoped to current-pass callers, so
+  unchanged files keep their CALLS edges in live mode.
+
+## J. Future-ideas reach-down (post-I)
+
+- [x] **J1** — `coverage_md` MCP tool. Single Markdown report of the
+  graph's dim spots: orphan functions, untested functions ranked by
+  fan-in, files with no notes, packages with zero doc-mentions.
+- [x] **J2** — `explore` (token-budgeted) MCP tool. BFS from a seed,
+  score `degree + 4·has_notes + 2·has_mentions − 5·depth`, greedily
+  fill a Markdown report until `char_budget` is exhausted; footer
+  reports drops.
+- [x] **J3** — Sidecar feedback-loop filter on the watcher path
+  filter. `*.codegraph-meta.json` and `*.db*` no longer trigger
+  reindex — closes the obvious feedback loop.
+
+## K. Refactor pass (post-J)
+
+- [x] **K1** — Plan staged refactor in [`refactoring.md`](refactoring.md).
+- [x] **K2** — `chrono_now_iso` extracted into `codegraph-core::time`.
+- [x] **K3** — `parse_node_address(_with_defaults)` consistent across
+  `node_md` / `impact` / `explore` / `watch` / `unwatch`.
+- [x] **K4** — `mcp/src/main.rs` split into `util` / `render` / `tx` /
+  `watch` modules. Down from 4256 → 3522 LoC.
+- [x] **K5** — Indexer phase split: `phase_history`,
+  `phase_test_tagging`, `phase_watch_triggers`, `save_sidecar`. The
+  orchestrator's tail dropped from ~145 LoC inline to ~10 LoC.
+- [ ] **K6** — Per-tool handler split in `mcp/src/main.rs`. Still
+  3522 LoC; ~3000 LoC of handlers could move into `tools/<name>.rs`
+  files. Mechanical, deferred until next concrete itch.
+- [ ] **K7** — `IndexCtx` / `tools::Ctx` structs. Skipped: current
+  signatures aren't painful; pull forward when we add a cross-cutting
+  concern (per-call timing, logging) that justifies the indirection.
+
+More ambitious follow-ups (reverse-Markdown round-trip, cross-repo
+federation, MCP Resources) live in [`future-ideas.md`](future-ideas.md).
 
 ## What's left
-
-The remaining open items are:
 
 - **C2** — needs the actual GitHub repository URL.
 - **C5** — needs an installed Rust 1.75 toolchain to verify locally;
   CI does verify on every push.
 - **F2** / **F3** — pure nice-to-haves, not blockers.
-- **H1**–**H9** — see section above.
+- **K6** / **K7** — see refactor section.
+- Smaller follow-ups noted in `journal.md`: workDoneProgress wait
+  instead of fixed sleeps in LSP, chunking for huge `IN [...]` lists,
+  persistent LSP across MCP restarts, save-time `:GitCommit` overlay.
 
 Everything else is done. `cargo build --workspace`,
-`cargo test --workspace` (37 tests), `cargo fmt --all -- --check` and
-`cargo clippy --workspace --all-targets -- -D warnings` all pass.
+`cargo test --workspace` (**69 tests**), `cargo fmt --all -- --check`
+and `cargo clippy --workspace --all-targets -- -D warnings` all pass.
