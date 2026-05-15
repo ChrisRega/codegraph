@@ -5,7 +5,7 @@
 //!   outgoingCalls()       → CALLS edges (compiler-precise, not name-match)
 //!   goToImplementation()  → IMPLEMENTS edges
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use codegraph_core::{escape_str, Db};
@@ -13,12 +13,42 @@ use lsp_types::{DocumentSymbol, SymbolKind};
 
 use crate::lsp::{self, LspClient};
 
+/// `didOpen` if not yet known to the LSP, otherwise `didChange` with the
+/// next version. Tracks state in `opened: path → next_version`.
+fn open_or_change(
+    lsp: &mut LspClient,
+    opened: &mut HashMap<PathBuf, i32>,
+    abs_path: &Path,
+) -> Result<(), String> {
+    let path_buf = abs_path.to_path_buf();
+    if let Some(next) = opened.get_mut(&path_buf) {
+        let v = *next;
+        *next += 1;
+        lsp.change_file(abs_path, v)
+    } else {
+        lsp.open_file(abs_path)?;
+        opened.insert(path_buf, 1);
+        Ok(())
+    }
+}
+
 /// Index all source files in the workspace using the given LSP client.
+///
+/// `opened` tracks which files have been `didOpen`-ed on this client so
+/// subsequent passes use `didChange` instead — avoids the duplicate-
+/// `didOpen` warning rust-analyzer logs and gives the LSP fresh content
+/// after a save. Pass an empty (or fresh) map for a one-shot client.
+///
+/// `initial_warmup` is `true` on the first pass against a freshly-spawned
+/// LSP — controls whether we sleep 15s after the bulk open (cold start)
+/// or just 1s (server already idle).
 ///
 /// Returns `(symbols_count, functions_count, calls_count)`.
 pub fn index_files_via_lsp(
     db: &Db,
     lsp: &mut LspClient,
+    opened: &mut HashMap<PathBuf, i32>,
+    initial_warmup: bool,
     files: &[(PathBuf, String, String)],
     _workspace: &Path,
 ) -> (u32, u32, u32) {
@@ -30,11 +60,19 @@ pub fn index_files_via_lsp(
 
     eprintln!("  [*] Opening {} files in LSP server...", files.len());
     for (abs_path, _, _) in files {
-        let _ = lsp.open_file(abs_path);
+        let _ = open_or_change(lsp, opened, abs_path);
     }
 
-    eprintln!("  [*] Waiting for language server to index...");
-    std::thread::sleep(std::time::Duration::from_secs(15));
+    let warmup_secs = if initial_warmup { 15 } else { 1 };
+    eprintln!(
+        "  [*] Waiting {warmup_secs}s for language server to {}...",
+        if initial_warmup {
+            "index workspace"
+        } else {
+            "settle"
+        }
+    );
+    std::thread::sleep(std::time::Duration::from_secs(warmup_secs));
 
     for (abs_path, rel_path, pkg_name) in files {
         let file_content = std::fs::read_to_string(abs_path).unwrap_or_default();
@@ -56,10 +94,9 @@ pub fn index_files_via_lsp(
             pn = escape_str(pkg_name),
         ));
 
-        if let Err(e) = lsp.open_file(abs_path) {
-            eprintln!("  [!] LSP open failed: {} — {e}", rel_path);
-            continue;
-        }
+        // Already opened/changed in the bulk pass above; do not re-fire the
+        // notification per file (would either double-open or emit a redundant
+        // didChange and confuse the LSP's version counter).
         let symbols = match lsp.document_symbols(abs_path) {
             Ok(s) => s,
             Err(e) => {

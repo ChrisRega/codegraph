@@ -187,6 +187,26 @@ impl LspClient {
         )
     }
 
+    /// Tell the server a file we previously opened has changed on disk.
+    /// Whole-document replace at the given `version`. Use this in
+    /// persistent-pool mode instead of a duplicate `didOpen`.
+    pub fn change_file(&mut self, path: &Path, version: i32) -> Result<(), String> {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
+        let uri = file_uri(path)?;
+        self.notify(
+            "textDocument/didChange",
+            DidChangeTextDocumentParams {
+                text_document: VersionedTextDocumentIdentifier { uri, version },
+                content_changes: vec![TextDocumentContentChangeEvent {
+                    range: None,
+                    range_length: None,
+                    text: content,
+                }],
+            },
+        )
+    }
+
     /// Get all symbols in a file.
     pub fn document_symbols(&mut self, path: &Path) -> Result<Vec<DocumentSymbol>, String> {
         let uri = file_uri(path)?;
@@ -402,4 +422,108 @@ pub fn symbol_kind_str(kind: SymbolKind) -> &'static str {
 /// Convert an LSP Position to a 1-based line number.
 pub fn line_1based(pos: &Position) -> u32 {
     pos.line + 1
+}
+
+// ── Persistent LSP pool ──────────────────────────────────────────────────────
+
+use std::collections::HashSet;
+use std::path::PathBuf;
+
+/// One entry in [`LspPool`]: a live `LspClient` plus the set of files we've
+/// already sent `textDocument/didOpen` for. Subsequent passes use that map
+/// to choose between `didChange` (file already known to the LSP) and a
+/// fresh `didOpen` (newly touched).
+pub struct PooledClient {
+    pub client: LspClient,
+    pub workspace: PathBuf,
+    /// path → next version number to send with `didChange`. The first
+    /// `didOpen` is at version 0; the first `didChange` after that uses 1.
+    pub opened: HashMap<PathBuf, i32>,
+    /// True after the first `index_files_via_lsp` pass — used to skip the
+    /// 15s warm-up sleep, since the LSP has already crunched through the
+    /// workspace. New per-batch files still get a short settle wait.
+    pub warmed_up: bool,
+}
+
+/// A pool of live `LspClient`s keyed by command (e.g. `"rust-analyzer"`,
+/// `"typescript-language-server"`, `"pyright-langserver"`). Owned by the
+/// MCP server's watcher thread so the cold-start cost is paid exactly
+/// once per language server, regardless of how many file-change batches
+/// arrive.
+#[derive(Default)]
+pub struct LspPool {
+    clients: HashMap<String, PooledClient>,
+    /// Commands we've tried to start and failed on. Avoids retrying on
+    /// every batch when (e.g.) `rust-analyzer` isn't installed.
+    failed: HashSet<String>,
+}
+
+impl LspPool {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Get a mutable reference to the pooled client for `command`, starting
+    /// a fresh process if there isn't one yet. Returns `Err` (and remembers
+    /// the failure) if the LSP could not be spawned.
+    pub fn get_or_start(
+        &mut self,
+        command: &str,
+        args: &[&str],
+        workspace: &Path,
+    ) -> Result<&mut PooledClient, String> {
+        if self.failed.contains(command) {
+            return Err(format!(
+                "LSP `{command}` previously failed to start; not retrying"
+            ));
+        }
+        if !self.clients.contains_key(command) {
+            match LspClient::start(command, args, workspace) {
+                Ok(client) => {
+                    self.clients.insert(
+                        command.to_string(),
+                        PooledClient {
+                            client,
+                            workspace: workspace.to_path_buf(),
+                            opened: HashMap::new(),
+                            warmed_up: false,
+                        },
+                    );
+                }
+                Err(e) => {
+                    self.failed.insert(command.to_string());
+                    return Err(e);
+                }
+            }
+        }
+        Ok(self.clients.get_mut(command).expect("just inserted above"))
+    }
+
+    /// Number of live LSP processes currently in the pool.
+    pub fn live_count(&self) -> usize {
+        self.clients.len()
+    }
+
+    /// List of commands currently pooled, for diagnostics.
+    pub fn live_commands(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.clients.keys().cloned().collect();
+        v.sort();
+        v
+    }
+
+    /// Send `shutdown` + `exit` to every pooled client. Best-effort: errors
+    /// are logged to stderr but do not abort.
+    pub fn shutdown_all(&mut self) {
+        for (cmd, pc) in std::mem::take(&mut self.clients) {
+            if let Err(e) = pc.client.shutdown() {
+                eprintln!("[lsp-pool] {cmd} shutdown: {e}");
+            }
+        }
+    }
+}
+
+impl Drop for LspPool {
+    fn drop(&mut self) {
+        self.shutdown_all();
+    }
 }

@@ -38,10 +38,12 @@ use walkdir::WalkDir;
 mod api_spec;
 mod bdd_steps;
 mod gherkin;
-mod lsp;
+pub mod lsp;
 mod lsp_index;
 mod markdown_index;
 pub mod meta;
+
+pub use lsp::LspPool;
 
 /// Public entry point for `codegraph-indexer`. Mirrors the CLI flags.
 #[derive(Debug, Clone)]
@@ -140,13 +142,25 @@ impl ProjectKind {
     }
 }
 
-/// Run a single indexer pass against the configured workspace + database.
-///
-/// All progress is logged to stderr (preserving the previous CLI behaviour).
-/// Returns an [`IndexStats`] on success or an error string on
-/// unrecoverable problems (workspace cannot be resolved, db cannot be
-/// opened).
+/// Run a single indexer pass with a transient LSP client (started fresh,
+/// shut down at the end). Suitable for the CLI binary.
 pub fn run_indexer(opts: IndexOptions) -> Result<IndexStats, String> {
+    run_indexer_inner(opts, None)
+}
+
+/// Run a single indexer pass against `pool`'s persistent LSP clients —
+/// the per-language LSP is started lazily on first use and reused across
+/// every subsequent call. Saves the (~5s) cold-start cost on each batch
+/// and switches per-file notifications to `didChange` after the first
+/// `didOpen`.
+pub fn run_indexer_with_pool(opts: IndexOptions, pool: &mut LspPool) -> Result<IndexStats, String> {
+    run_indexer_inner(opts, Some(pool))
+}
+
+/// Shared implementation — the only difference between the two public
+/// entry points is whether the LSP client is owned by the pool or by
+/// this function.
+fn run_indexer_inner(opts: IndexOptions, pool: Option<&mut LspPool>) -> Result<IndexStats, String> {
     let IndexOptions {
         workspace: workspace_input,
         db_path,
@@ -358,23 +372,62 @@ pub fn run_indexer(opts: IndexOptions) -> Result<IndexStats, String> {
 
     // ── Phase 3+4: Index files and build call graph via LSP ──────────────────
     let lsp_args = kind.lsp_args();
-    let mut lsp = lsp::LspClient::start(&lsp_cmd, &lsp_args, &workspace).unwrap_or_else(|e| {
-        eprintln!("  [!] LSP `{lsp_cmd}` failed to start: {e}");
-        eprintln!(
-            "  [!] Install one of: rust-analyzer, typescript-language-server (--stdio), pyright-langserver (--stdio)"
-        );
-        eprintln!("  [!] Or pass --lsp <binary> to override the default for this project kind.");
-        std::process::exit(1);
-    });
     let owned_files: Vec<(PathBuf, String, String)> = files_to_index
         .iter()
         .map(|(a, b, c)| (a.clone(), b.clone(), c.clone()))
         .collect();
-    let (total_symbols, total_functions, call_edges) =
-        lsp_index::index_files_via_lsp(&db, &mut lsp, &owned_files, &workspace);
-    if let Err(e) = lsp.shutdown() {
-        eprintln!("  [!] LSP shutdown: {e}");
-    }
+    let (total_symbols, total_functions, call_edges) = match pool {
+        Some(pool) => {
+            // Pool-aware path: reuse the long-lived LSP client.
+            let pc = pool
+                .get_or_start(&lsp_cmd, &lsp_args, &workspace)
+                .map_err(|e| {
+                    format!(
+                        "LSP `{lsp_cmd}` failed to start: {e}\nInstall one of: \
+                         rust-analyzer, typescript-language-server (--stdio), \
+                         pyright-langserver (--stdio); or pass --lsp <binary>."
+                    )
+                })?;
+            let initial_warmup = !pc.warmed_up;
+            let result = lsp_index::index_files_via_lsp(
+                &db,
+                &mut pc.client,
+                &mut pc.opened,
+                initial_warmup,
+                &owned_files,
+                &workspace,
+            );
+            pc.warmed_up = true;
+            // No shutdown — the pool keeps the client alive for the next pass.
+            result
+        }
+        None => {
+            // Transient path: start + shut down per call.
+            let mut lsp =
+                lsp::LspClient::start(&lsp_cmd, &lsp_args, &workspace).unwrap_or_else(|e| {
+                    eprintln!("  [!] LSP `{lsp_cmd}` failed to start: {e}");
+                    eprintln!(
+                        "  [!] Install one of: rust-analyzer, typescript-language-server (--stdio), pyright-langserver (--stdio)"
+                    );
+                    eprintln!("  [!] Or pass --lsp <binary> to override the default for this project kind.");
+                    std::process::exit(1);
+                });
+            let mut opened: std::collections::HashMap<PathBuf, i32> =
+                std::collections::HashMap::new();
+            let result = lsp_index::index_files_via_lsp(
+                &db,
+                &mut lsp,
+                &mut opened,
+                true,
+                &owned_files,
+                &workspace,
+            );
+            if let Err(e) = lsp.shutdown() {
+                eprintln!("  [!] LSP shutdown: {e}");
+            }
+            result
+        }
+    };
 
     // ── Phase 4.5: API specs ────────────────────────────────────────────────
     let pkg_for_specs = match kind {
@@ -1629,6 +1682,36 @@ mod tests {
         assert_eq!(opts.path_set.as_ref().unwrap().len(), 2);
         // Sanity: the auto-mode flags are independent.
         assert!(!opts.force_full);
+    }
+
+    #[test]
+    fn lsp_pool_starts_empty() {
+        let pool = LspPool::new();
+        assert_eq!(pool.live_count(), 0);
+        assert!(pool.live_commands().is_empty());
+    }
+
+    #[test]
+    fn lsp_pool_remembers_failed_commands() {
+        let mut pool = LspPool::new();
+        let r1 = pool.get_or_start(
+            "definitely-not-a-real-lsp-binary-xyz",
+            &[],
+            std::path::Path::new("/tmp"),
+        );
+        assert!(r1.is_err());
+        // Second attempt short-circuits without trying to spawn again.
+        let r2 = pool.get_or_start(
+            "definitely-not-a-real-lsp-binary-xyz",
+            &[],
+            std::path::Path::new("/tmp"),
+        );
+        let msg = match r2 {
+            Err(e) => e,
+            Ok(_) => panic!("expected error, got Ok"),
+        };
+        assert!(msg.contains("previously failed to start"), "got: {msg}");
+        assert_eq!(pool.live_count(), 0);
     }
 
     /// Build a tiny throw-away git repo with two commits and verify the

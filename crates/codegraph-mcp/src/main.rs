@@ -2579,6 +2579,13 @@ fn handle_index_status(status: &SharedStatus, watch_path: Option<&str>) -> Value
             } else {
                 out.push_str("- _no runs yet — waiting for the first file change_\n");
             }
+            if !snap.live_lsps.is_empty() {
+                out.push_str(&format!(
+                    "- **Persistent LSP processes:** {} (`{}`)\n",
+                    snap.live_lsps.len(),
+                    snap.live_lsps.join("`, `")
+                ));
+            }
             if !snap.last_paths.is_empty() {
                 out.push_str("\n**Last batch paths**\n\n");
                 for p in &snap.last_paths {
@@ -2612,6 +2619,8 @@ struct IndexStatus {
     runs_total: u64,
     /// HEAD commit hash from the last successful run (or empty).
     head_hash: String,
+    /// Names of LSP commands currently held alive by the pool.
+    live_lsps: Vec<String>,
 }
 
 type SharedStatus = std::sync::Arc<std::sync::Mutex<IndexStatus>>;
@@ -2653,6 +2662,10 @@ fn spawn_indexer_watcher(
     use std::time::{Duration, Instant};
 
     std::thread::spawn(move || {
+        // One LspPool per watcher thread — owned here so its Drop fires when
+        // the thread exits (server shutdown). Each language server is started
+        // lazily on first need and reused across every subsequent batch.
+        let mut lsp_pool = codegraph_indexer::LspPool::new();
         let workspace_path = std::path::PathBuf::from(&workspace);
         let canonical = match workspace_path.canonicalize() {
             Ok(p) => p,
@@ -2743,8 +2756,15 @@ fn spawn_indexer_watcher(
             let started = Instant::now();
             let opts = codegraph_indexer::IndexOptions::new(canonical.clone(), &db_path)
                 .with_paths(rel_paths.clone());
-            let result = codegraph_indexer::run_indexer(opts);
+            // Persistent LSP pool: each language server pays its cold-start
+            // cost on the first batch only. Subsequent batches reuse the
+            // live process, send `didChange` for known files, and skip
+            // most of the warm-up sleep.
+            let result = codegraph_indexer::run_indexer_with_pool(opts, &mut lsp_pool);
             let elapsed = started.elapsed();
+            if let Ok(mut s) = status.lock() {
+                s.live_lsps = lsp_pool.live_commands();
+            }
 
             if let Ok(mut s) = status.lock() {
                 s.state = "idle".to_string();

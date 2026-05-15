@@ -8,6 +8,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Persistent LSP pool** (`codegraph_indexer::LspPool`). With
+  `--watch`, the MCP server now keeps every language server alive
+  across reindex batches — `rust-analyzer`, `typescript-language-server`,
+  `pyright-langserver`, anything LSP-compliant. Each server pays its
+  cold-start cost (~5s for rust-analyzer) on the **first** batch only;
+  every subsequent save settles in roughly the LSP's incremental
+  re-analyze time (often well under a second for single files).
+- **`didChange`-aware reindex.** `index_files_via_lsp` now sends a
+  proper `textDocument/didChange` notification with the new content
+  for files the LSP already knows about, instead of a duplicate
+  `didOpen`. Eliminates the `ERROR duplicate DidOpenTextDocument`
+  noise from rust-analyzer and gives the LSP fresh content after a
+  save. The 15s warm-up sleep is now skipped on subsequent passes
+  (replaced by a 1s settle wait).
 - **`--watch <workspace>` mode for `codegraph-mcp`.** When set, the
   MCP server spawns a `notify`-based filesystem watcher that
   re-runs the indexer on a debounced batch of file changes (default
