@@ -114,6 +114,7 @@ into an LLM reply, plus a `:Note` mechanism for persisting findings:
 | `find_symbol` | fuzzy substring search over functions and symbols, ranked |
 | `save_view` / `view` / `list_views` | persist + replay parameterised Cypher queries as `:View` nodes |
 | `diff_since` | what landed between a baseline commit and HEAD |
+| `define_concept` / `concept` / `list_concepts` | user-curated subsystem dossiers (members + mentioned fns + tests + notes) |
 | `begin` / `write` / `commit` / `rollback` | buffered transactions |
 | `explain` | velr planner trace |
 

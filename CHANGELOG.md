@@ -8,6 +8,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`:Concept` layer** — user-curated subsystem labels with
+  `define_concept`, `concept`, `list_concepts` MCP tools. A
+  `:Concept` connects to its members via `[:DESCRIBES]`; the
+  `concept(name)` dossier rolls up direct members, mentioned
+  `:Function`s, covering `:Test`s, and attached `:Note`s into one
+  Markdown report. Concepts survive `--full` reindex.
 - **`:Test` label + `[:TESTS]` edges.** A post-LSP indexer phase tags
   every `:Function` whose body contains `#[test]` or `#[tokio::test]`
   with a `:Test` label, then materialises `(:Test)-[:TESTS]->(:Function)`

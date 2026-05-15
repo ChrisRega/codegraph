@@ -139,6 +139,38 @@ to their `:Author` via the `[:AUTHORED]` edge.
 | --- | --- | --- |
 | `limit` | integer, optional | default `50` |
 
+## `define_concept`, `concept`, `list_concepts`
+
+User-curated subsystem labels. A `:Concept` is a node with a name and
+description; `[:DESCRIBES]` edges link it to whatever nodes the user
+declared as part of the subsystem (typically a mix of `:DocSection`,
+`:Function`, `:Package`).
+
+`define_concept(name, match, description?)` MERGEs the `:Concept` and
+attaches `[:DESCRIBES]->t` to every node bound by the supplied MATCH
+clause. Same `t`-binding contract as `write_note`.
+
+`concept(name)` renders a Markdown dossier:
+- description + creation timestamp
+- direct members (whatever the DESCRIBES edges point at)
+- functions in scope (members that are `:Function`, plus functions
+  mentioned by member `:DocSection`s)
+- tests covering those functions (via `[:TESTS]`)
+- notes attached to those functions
+
+`list_concepts` enumerates everything as a Markdown table with member
+counts.
+
+`:Concept` nodes survive `--full` reindex (excluded from the wipe set).
+
+| tool | arg | type | notes |
+| --- | --- | --- | --- |
+| `define_concept` | `name` | string, required | identifier-like |
+| `define_concept` | `match` | string, required | binds variable `t` |
+| `define_concept` | `description` | string, optional | |
+| `concept` | `name` | string, required | |
+| `list_concepts` | (none) | | |
+
 ## `diff_since`
 
 Reports what landed between a baseline `:GitCommit` and HEAD. HEAD is

@@ -188,6 +188,34 @@ Each entry: feature, what I reached for, what I wished existed.
   test that asserts on a static value without calling anything won't
   produce edges. Doc says so. A future pass could attribute test
   effects via macro expansion, but that's a different project.
+## H7 — `:Concept` layer
+
+- **Reached for:** zero greps. The shape is a copy-paste of the H3
+  saved-views pattern (MERGE + persistence + render) crossed with the
+  H1 multi-section dossier output. Reuse compounding.
+- **Honest scoping:** I built the *user-curated* concept layer, not
+  the auto-clustering one originally sketched in the brainstorm.
+  Embedding-based clustering is a different project (and would put a
+  hard dependency on a tokenizer / embedding model). The curated
+  version still buys "show me everything in the auth subsystem" with
+  one tool call and zero greps, which is the actual unblock.
+- **velr surprise #2 returns:** in `handle_concept` I needed
+  "function reachable as direct member OR via DocSection.MENTIONS".
+  Phrased as a single MATCH with OR it would have triggered the
+  UNION-LIMIT trap again, so I split into two queries up front and
+  union client-side via `BTreeSet`. The pattern is becoming routine.
+- **Wish #7:** if `:Concept`s could *contain* `:Concept`s
+  (`(:Concept)-[:CONTAINS]->(:Concept)`), the dossier could roll up
+  hierarchically — "auth → session → token". One-line indexer change
+  + a recursive resolution pass in the renderer. Punted to
+  `future-ideas.md`.
+- **Tests:** `concept_lifecycle_define_then_render` (defines
+  module-a covering 2 functions, asserts list_concepts surfaces it
+  and the dossier renders with both functions), and
+  `concept_unknown_returns_not_found`. Workspace 51/51.
+
+## H6 — `:Test` label and `[:TESTS]` edges
+
 - **Tests:** `phase6_tags_tests_and_links_them` (3 functions: a sync
   test, a tokio test, and a regular fn; asserts the right two carry
   `:Test` and exactly two `[:TESTS]` edges land on the right target).

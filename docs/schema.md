@@ -122,6 +122,14 @@ Edges:
   edges).
 - `(:GitCommit)-[:SNAPSHOT_OF]->(:Workspace)` — only the current `HEAD`.
 
+### `:Concept`
+
+User-curated subsystem label. Created via the `define_concept` MCP
+tool; carries `name`, `description`, `created_at`, `updated_at`. Linked
+to its constituents via `[:DESCRIBES]` (which can point at any
+node — typically `:DocSection`, `:Function`, `:Package`). Survives
+`--full` reindex.
+
 ### `:Note`
 
 Free-form Markdown notes written by humans or LLM agents via the
@@ -196,6 +204,7 @@ OpenAPI operations / GraphQL SDL types / Protobuf RPCs and messages.
 | `HAS_SCENARIO`, `HAS_STEP` | Feature → Scenario, Scenario → Step | |
 | `IMPLEMENTED_BY` | Step → Function | regex match of `Step.text` against `Function.step_regex` |
 | `TESTS` | Test → Function | derived from `[:CALLS]` where the source carries `:Test` and the target does not |
+| `DESCRIBES` | Concept → any | user-curated subsystem membership |
 | `EXPOSES` | Package → APIEndpoint or APIType | API specs |
 | `USES_SCHEMA` | APIEndpoint → APIType | OpenAPI `$ref`s |
 | `HAS_FIELD` | APIType → Field | |

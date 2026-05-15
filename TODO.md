@@ -127,7 +127,7 @@ for, with the lowest-token answer for each question shape.
   `#[test]` / `#[tokio::test]` functions and link them to the
   function-under-test where derivable. Enables "what changed without
   test coverage" queries.
-- [ ] **H7** — `:Concept` layer. Cluster `:DocSection`s into
+- [x] **H7** — `:Concept` layer. Cluster `:DocSection`s into
   `:Concept`s; expose `concept(name)` returning a subsystem dossier
   (functions + docs + tests + open notes).
 - [ ] **H8** — Auto-notes from PR comments. `gh pr view --comments`
