@@ -73,7 +73,7 @@ rows to drop directly into a doc, note, or chat reply.
 | --- | --- | --- |
 | `query` | string, required | |
 
-## `node_md`
+## `node_md` (ranked output)
 
 Returns a compact Markdown dossier for a single node identified by a
 property lookup: properties (as JSON), outgoing edges grouped by edge
@@ -88,6 +88,14 @@ type, incoming edges grouped by edge type, and any attached `:Note`s.
 
 Both `label` and `key` are validated against `^[A-Za-z_][A-Za-z0-9_]*$`
 because they're inlined into the query — invalid input is rejected.
+
+Within each edge group, neighbours are sorted **by total degree
+(in + out) descending**, then alphabetically. Hubs surface first so
+the per-group `neighbours_limit` cap doesn't silently drop the most
+load-bearing neighbour. Each row gets a trailing `_(deg N)_` tag when
+the degree is non-zero. Degree lookup is best-effort: if the
+aggregating query fails, ordering degrades to alphabetical without
+erroring.
 
 ## `write_note`
 

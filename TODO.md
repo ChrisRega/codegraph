@@ -120,7 +120,7 @@ for, with the lowest-token answer for each question shape.
   `:PARENT_OF` DAG and list functions/files added/changed/removed
   since the given commit, as a Markdown table. PR-prep / changelog
   generator.
-- [ ] **H5** — Ranked neighbours in `node_md`. Sort outgoing /
+- [x] **H5** — Ranked neighbours in `node_md`. Sort outgoing /
   incoming edges by importance (fan-in/out, recent commit churn) and
   cap at top-N per edge type. Hubs no longer blow up the dossier.
 - [ ] **H6** — `:Test` label + `[:TESTS]` edge. Discover Rust

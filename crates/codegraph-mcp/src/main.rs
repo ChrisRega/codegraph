@@ -650,6 +650,42 @@ fn handle_node_md(db: &Db, params: &Value) -> Value {
     ok_text(out.trim_end().to_string())
 }
 
+/// Best-effort total degree (in + out) for the given `qualified_name`s.
+/// Returns an empty map if the aggregating query fails — the caller treats
+/// missing entries as degree 0 and sorts them last, so a velr regression
+/// just degrades to alphabetical ordering instead of erroring out.
+fn neighbour_degrees(db: &Db, qns: &[String]) -> std::collections::HashMap<String, i64> {
+    use std::collections::HashMap;
+    let mut map: HashMap<String, i64> = HashMap::new();
+    if qns.is_empty() {
+        return map;
+    }
+    let in_list = qns
+        .iter()
+        .map(|s| escape_str(s))
+        .collect::<Vec<_>>()
+        .join(",");
+    let q = format!(
+        "MATCH (m) WHERE m.qualified_name IN [{in_list}] \
+         OPTIONAL MATCH (m)-[r]-() \
+         RETURN m.qualified_name AS qn, count(r) AS deg"
+    );
+    if let Ok(t) = db.query(&q) {
+        for row in &t.rows {
+            let qn = row
+                .first()
+                .and_then(|c| c.as_str())
+                .unwrap_or("")
+                .to_string();
+            let deg = row.get(1).and_then(|c| c.as_i64()).unwrap_or(0);
+            if !qn.is_empty() {
+                map.insert(qn, deg);
+            }
+        }
+    }
+    map
+}
+
 fn render_neighbours(db: &Db, query: &str, limit_per_rel: i64) -> String {
     let t = match db.query(query) {
         Ok(t) => t,
@@ -659,12 +695,14 @@ fn render_neighbours(db: &Db, query: &str, limit_per_rel: i64) -> String {
         return "_(none)_\n".to_string();
     }
     use std::collections::BTreeMap;
-    let mut groups: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+    // (lbls, identity, qn_for_degree_lookup)
+    let mut groups: BTreeMap<String, Vec<(String, String, String)>> = BTreeMap::new();
     let rel_i = t.col("rel");
     let lbl_i = t.col("lbls");
     let qn_i = t.col("qn");
     let nm_i = t.col("nm");
     let pa_i = t.col("path");
+    let mut degree_lookup_qns: Vec<String> = Vec::new();
     for row in &t.rows {
         let rel = rel_i
             .and_then(|i| row.get(i))
@@ -676,30 +714,54 @@ fn render_neighbours(db: &Db, query: &str, limit_per_rel: i64) -> String {
             .and_then(|c| c.as_str())
             .unwrap_or("[]")
             .to_string();
-        let identity = qn_i
+        let qn = qn_i
             .and_then(|i| row.get(i))
             .and_then(|c| c.as_str())
-            .or_else(|| nm_i.and_then(|i| row.get(i)).and_then(|c| c.as_str()))
-            .or_else(|| pa_i.and_then(|i| row.get(i)).and_then(|c| c.as_str()))
-            .unwrap_or("?")
+            .unwrap_or("")
             .to_string();
-        groups.entry(rel).or_default().push((lbls, identity));
+        let identity = if !qn.is_empty() {
+            qn.clone()
+        } else {
+            nm_i.and_then(|i| row.get(i))
+                .and_then(|c| c.as_str())
+                .or_else(|| pa_i.and_then(|i| row.get(i)).and_then(|c| c.as_str()))
+                .unwrap_or("?")
+                .to_string()
+        };
+        if !qn.is_empty() {
+            degree_lookup_qns.push(qn.clone());
+        }
+        groups.entry(rel).or_default().push((lbls, identity, qn));
     }
+
+    let degrees = neighbour_degrees(db, &degree_lookup_qns);
+
     let mut out = String::new();
     for (rel, mut items) in groups {
+        // Sort by degree desc, then by identity asc for stable output.
+        items.sort_by(|a, b| {
+            let da = degrees.get(&a.2).copied().unwrap_or(0);
+            let db_ = degrees.get(&b.2).copied().unwrap_or(0);
+            db_.cmp(&da).then_with(|| a.1.cmp(&b.1))
+        });
         let total = items.len();
         let truncated = total > limit_per_rel as usize;
         items.truncate(limit_per_rel as usize);
         out.push_str(&format!(
             "- **`-[:{rel}]->`** ({total}{})\n",
             if truncated {
-                format!(", showing {limit_per_rel}")
+                format!(", showing top {limit_per_rel}")
             } else {
                 String::new()
             }
         ));
-        for (lbls, ident) in items {
-            out.push_str(&format!("  - `{lbls}` `{ident}`\n"));
+        for (lbls, ident, qn) in items {
+            let deg_tag = degrees
+                .get(&qn)
+                .filter(|d| **d > 0)
+                .map(|d| format!(" _(deg {d})_"))
+                .unwrap_or_default();
+            out.push_str(&format!("  - `{lbls}` `{ident}`{deg_tag}\n"));
         }
     }
     out
@@ -2032,6 +2094,47 @@ mod tests {
         assert!(md.contains("## Outgoing edges"));
         assert!(md.contains("-[:CALLS]->"));
         assert!(md.contains("a::bar"));
+    }
+
+    #[test]
+    fn node_md_ranks_neighbours_by_degree() {
+        let db = Db::open_in_memory().unwrap();
+        // hub has many incoming/outgoing edges; leaf has just one.
+        for n in ["seed", "hub", "leaf", "x1", "x2", "x3"] {
+            db.run(&format!(
+                "CREATE (:Function {{qualified_name: 'r::{n}', name: '{n}'}})"
+            ))
+            .unwrap();
+        }
+        // seed -> hub, seed -> leaf
+        for tgt in ["hub", "leaf"] {
+            db.run(&format!(
+                "MATCH (a:Function {{qualified_name: 'r::seed'}}), \
+                       (b:Function {{qualified_name: 'r::{tgt}'}}) \
+                 CREATE (a)-[:CALLS]->(b)"
+            ))
+            .unwrap();
+        }
+        // hub gets multiple extra edges so its degree dwarfs leaf's.
+        for tgt in ["x1", "x2", "x3"] {
+            db.run(&format!(
+                "MATCH (a:Function {{qualified_name: 'r::hub'}}), \
+                       (b:Function {{qualified_name: 'r::{tgt}'}}) \
+                 CREATE (a)-[:CALLS]->(b)"
+            ))
+            .unwrap();
+        }
+        let v = handle_node_md(
+            &db,
+            &json!({ "label": "Function", "key": "qualified_name", "value": "r::seed" }),
+        );
+        let md = text_of(&v);
+        // hub must appear before leaf in the outgoing CALLS group.
+        let pos_hub = md.find("r::hub").expect("hub missing");
+        let pos_leaf = md.find("r::leaf").expect("leaf missing");
+        assert!(pos_hub < pos_leaf, "hub should outrank leaf:\n{md}");
+        // degree tag rendered for non-zero degree
+        assert!(md.contains("_(deg "), "degree tag missing:\n{md}");
     }
 
     #[test]

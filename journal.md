@@ -141,3 +141,26 @@ Each entry: feature, what I reached for, what I wished existed.
   setup, asserts only mid + new functions show up in the range while
   the pre-baseline `old::a` is excluded), and
   `diff_since_unknown_commit_returns_message`. mcp suite 22/22.
+
+## H5 — Ranked neighbours in `node_md`
+
+- **Reached for:** `Read` of the `render_neighbours` body — already had
+  the call-site context from H1/H2/H3. No greps. The local change is
+  small but nuanced.
+- **Design call:** ranking is one extra aggregating query per
+  direction (`OPTIONAL MATCH (m)-[r]-() RETURN m.qualified_name,
+  count(r)`). One query per direction beats N queries per neighbour,
+  and degrades gracefully — if velr trips on the implicit grouping,
+  `neighbour_degrees` returns an empty map and ordering falls back to
+  alphabetical (no error path bubbles up).
+- **Trade-off accepted:** degree is total fan, not weighted by edge
+  type. A `:File` with many `[:CONTAINS]` edges outranks a heavily-
+  called `:Function`, which is arguably wrong. Acceptable for now —
+  the LLM-facing improvement (hubs surface before truncation) lands
+  cleanly even with the crude metric.
+- **Wish #6:** velr should expose a stable degree property cached on
+  each node, refreshed during indexing. The aggregation query is
+  O(edges) per call, which won't scale on big graphs.
+- **Tests:** `node_md_ranks_neighbours_by_degree` (5-node setup with
+  one hub, asserts the hub appears before the leaf in the rendered
+  Markdown and the `_(deg N)_` tag is present). mcp suite 23/23.

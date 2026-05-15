@@ -8,6 +8,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Ranked neighbours in `node_md`** — within each edge group,
+  neighbours are now sorted by total degree (in + out) descending so
+  the per-group cap surfaces the most load-bearing nodes first. Each
+  row carries a `_(deg N)_` tag when degree is non-zero.
 - **`diff_since` MCP tool** — walks the `:GitCommit` DAG between a
   baseline commit and HEAD, listing commits in range and `:File` /
   `:Function` nodes whose `first_seen_commit` lands inside it.
