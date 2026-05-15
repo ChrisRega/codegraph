@@ -657,33 +657,15 @@ fn handle_cypher_md(db: &Db, params: &Value) -> Value {
 }
 
 fn handle_node_md(db: &Db, params: &Value) -> Value {
-    let label = match params.get("label").and_then(|v| v.as_str()) {
-        Some(s) => s.to_string(),
-        None => return err_text("missing required argument: label".to_string()),
-    };
-    let key = match params.get("key").and_then(|v| v.as_str()) {
-        Some(s) => s.to_string(),
-        None => return err_text("missing required argument: key".to_string()),
-    };
-    let value = match params.get("value").and_then(|v| v.as_str()) {
-        Some(s) => s.to_string(),
-        None => return err_text("missing required argument: value".to_string()),
+    let (label, key, value) = match parse_node_address(params) {
+        Ok(t) => t,
+        Err(e) => return err_text(e),
     };
     let neighbours_limit = params
         .get("neighbours_limit")
         .and_then(|v| v.as_i64())
         .unwrap_or(25)
         .max(1);
-
-    // Reject anything that doesn't look like a bare identifier — defensive,
-    // since label/key are inlined directly into Cypher.
-    if !safe_ident(&label) {
-        return err_text(format!("invalid label: {label}"));
-    }
-    if !safe_ident(&key) {
-        return err_text(format!("invalid key: {key}"));
-    }
-
     let val_lit = escape_str(&value);
     let mut out = String::new();
     out.push_str(&format!("# `:{label} {{{key}: {value:?}}}`\n\n"));
@@ -1093,16 +1075,29 @@ fn handle_history(db: &Db, params: &Value) -> Value {
 // ── watch / unwatch ───────────────────────────────────────────────────────────
 
 fn parse_node_address(params: &Value) -> Result<(String, String, String), String> {
+    parse_node_address_with_defaults(params, None, None)
+}
+
+/// Same shape as [`parse_node_address`] but `label` / `key` may have
+/// defaults, used by handlers like `impact` and `find_symbol` where
+/// "Function/qualified_name" is the overwhelming common case.
+fn parse_node_address_with_defaults(
+    params: &Value,
+    default_label: Option<&str>,
+    default_key: Option<&str>,
+) -> Result<(String, String, String), String> {
     let label = params
         .get("label")
         .and_then(|v| v.as_str())
-        .ok_or("missing required argument: label")?
-        .to_string();
+        .map(str::to_string)
+        .or_else(|| default_label.map(str::to_string))
+        .ok_or("missing required argument: label")?;
     let key = params
         .get("key")
         .and_then(|v| v.as_str())
-        .ok_or("missing required argument: key")?
-        .to_string();
+        .map(str::to_string)
+        .or_else(|| default_key.map(str::to_string))
+        .ok_or("missing required argument: key")?;
     let value = params
         .get("value")
         .and_then(|v| v.as_str())
@@ -1550,19 +1545,9 @@ fn explore_hop(
 }
 
 fn handle_explore(db: &Db, params: &Value) -> Value {
-    let label = match params.get("label").and_then(|v| v.as_str()) {
-        Some(s) if safe_ident(s) => s.to_string(),
-        Some(s) => return err_text(format!("invalid label: {s:?}")),
-        None => return err_text("missing required argument: label".to_string()),
-    };
-    let key = match params.get("key").and_then(|v| v.as_str()) {
-        Some(s) if safe_ident(s) => s.to_string(),
-        Some(s) => return err_text(format!("invalid key: {s:?}")),
-        None => return err_text("missing required argument: key".to_string()),
-    };
-    let value = match params.get("value").and_then(|v| v.as_str()) {
-        Some(s) => s.to_string(),
-        None => return err_text("missing required argument: value".to_string()),
+    let (label, key, value) = match parse_node_address(params) {
+        Ok(t) => t,
+        Err(e) => return err_text(e),
     };
     let char_budget = params
         .get("char_budget")
@@ -2774,20 +2759,11 @@ fn render_impact_section(title: &str, items: &[(String, String, i64)], top: i64)
 }
 
 fn handle_impact(db: &Db, params: &Value) -> Value {
-    let label = params
-        .get("label")
-        .and_then(|v| v.as_str())
-        .unwrap_or("Function")
-        .to_string();
-    let key = params
-        .get("key")
-        .and_then(|v| v.as_str())
-        .unwrap_or("qualified_name")
-        .to_string();
-    let value = match params.get("value").and_then(|v| v.as_str()) {
-        Some(s) => s.to_string(),
-        None => return err_text("missing required argument: value".to_string()),
-    };
+    let (label, key, value) =
+        match parse_node_address_with_defaults(params, Some("Function"), Some("qualified_name")) {
+            Ok(t) => t,
+            Err(e) => return err_text(e),
+        };
     let depth = params
         .get("depth")
         .and_then(|v| v.as_i64())
@@ -2798,14 +2774,6 @@ fn handle_impact(db: &Db, params: &Value) -> Value {
         .and_then(|v| v.as_i64())
         .unwrap_or(15)
         .max(1);
-
-    if !safe_ident(&label) {
-        return err_text(format!("invalid label: {label}"));
-    }
-    if !safe_ident(&key) {
-        return err_text(format!("invalid key: {key}"));
-    }
-
     let val_lit = escape_str(&value);
 
     // Verify the seed exists (and grab its file).
