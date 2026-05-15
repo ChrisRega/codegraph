@@ -76,12 +76,16 @@ files change in the workspace, debounced by `--debounce-ms` (default
 tool call after a reindex it transparently reopens the velr handle
 because the on-disk mtime advanced.
 
-> **v1 caveat.** The watcher triggers `run_indexer` in incremental
-> mode, which keys off `git diff` between the sidecar's last-indexed
-> commit and HEAD. Uncommitted saves fire the watcher but the indexer
-> sees no diff and exits as a noop. Net behaviour today: graph
-> auto-refreshes on `git commit`, not on save. Lifting this needs an
-> explicit per-path reindex API on the indexer library.
+The watcher triggers the indexer in **live mode**: only the changed
+files are re-parsed, the git-history phase is skipped, and the sidecar
+metadata is left untouched. Uncommitted edits show up as a draft
+overlay; the persistent revision history (`:GitCommit` / `:Author`)
+only advances when you actually commit and the next CLI / Auto run
+fires.
+
+Use the `index_status` MCP tool to wait for the indexer to settle
+before issuing fresh queries — when `state` is `idle`, the most recent
+debounced batch is fully applied.
 
 The full list of tools and their JSON Schemas is in
 [`docs/mcp-tools.md`](docs/mcp-tools.md).

@@ -11,6 +11,24 @@ short Cypher cheat-sheet. No arguments. Use this first when wiring up
 an LLM session — the result describes the graph the model is allowed to
 query.
 
+## `index_status`
+
+Reports the live indexer's state when the MCP server was started with
+`--watch <workspace>`. No arguments. Returns a Markdown summary with:
+
+- `state` — `idle` or `running`
+- `runs_total`, `last_run_at`, `last_run_mode` (`live` / `incremental` /
+  `full` / `noop` / `error`), `last_run_duration_ms`
+- `head_hash` short prefix at the time of the last run
+- `last_paths` — workspace-relative paths from the most recent batch
+  (capped at 20 in the rendered output)
+- `last_error` if the previous run failed
+
+Use this to wait until pending edits are reflected before issuing fresh
+queries: when `state` is `idle`, the most recent debounced batch is
+fully applied. Without `--watch`, the response makes the no-op explicit
+("Live indexer is **not running**") so an LLM doesn't poll forever.
+
 ## `cypher`
 
 Executes a single openCypher query (read or write) and returns the row

@@ -1623,10 +1623,8 @@ mod tests {
 
     #[test]
     fn index_options_with_paths_switches_to_live_mode() {
-        let opts = IndexOptions::new(PathBuf::from("/x"), "db").with_paths(vec![
-            "src/a.rs".into(),
-            "src/b.rs".into(),
-        ]);
+        let opts = IndexOptions::new(PathBuf::from("/x"), "db")
+            .with_paths(vec!["src/a.rs".into(), "src/b.rs".into()]);
         assert!(opts.path_set.is_some());
         assert_eq!(opts.path_set.as_ref().unwrap().len(), 2);
         // Sanity: the auto-mode flags are independent.

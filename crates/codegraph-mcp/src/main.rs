@@ -274,6 +274,11 @@ fn tool_list() -> Value {
                 "inputSchema": { "type": "object", "properties": {} }
             },
             {
+                "name": "index_status",
+                "description": "Report the live indexer's current state when the MCP server was started with `--watch`. Use this to wait until pending edits are reflected in the graph before issuing fresh queries: when `state` is `idle`, the most recent debounced batch is fully applied. Without `--watch`, returns a stub showing the live indexer is not running.",
+                "inputSchema": { "type": "object", "properties": {} }
+            },
+            {
                 "name": "diff_since",
                 "description": "Walk the `:GitCommit` `[:PARENT_OF]` DAG and report what changed between the given commit and HEAD. Lists commits in the range and the `:File` / `:Function` nodes whose `first_seen_commit` lands inside it (i.e. added during the range). Removals are not tracked because the indexer does not keep tombstones — see the note in `docs/mcp-tools.md`.",
                 "inputSchema": {
@@ -2538,18 +2543,111 @@ fn is_indexable_event_path(p: &std::path::Path) -> bool {
     )
 }
 
+/// Render the live indexer status as Markdown. Safe to call whether or
+/// not `--watch` was supplied: without a watcher, returns a stub making
+/// the no-op explicit so an LLM doesn't poll forever.
+fn handle_index_status(status: &SharedStatus, watch_path: Option<&str>) -> Value {
+    let snap = match status.lock() {
+        Ok(g) => g.clone(),
+        Err(p) => p.into_inner().clone(),
+    };
+    let mut out = String::new();
+    out.push_str("# Indexer status\n\n");
+    match watch_path {
+        None => {
+            out.push_str("_Live indexer is **not running** — start the MCP server with `--watch <workspace>` to enable._\n");
+        }
+        Some(ws) => {
+            out.push_str(&format!("- **Watching:** `{ws}`\n"));
+            out.push_str(&format!("- **State:** `{}`\n", snap.state));
+            out.push_str(&format!("- **Runs total:** {}\n", snap.runs_total));
+            if !snap.last_run_at.is_empty() {
+                out.push_str(&format!("- **Last run at:** `{}`\n", snap.last_run_at));
+                out.push_str(&format!("- **Last mode:** `{}`\n", snap.last_run_mode));
+                out.push_str(&format!(
+                    "- **Last duration:** {}ms\n",
+                    snap.last_run_duration_ms
+                ));
+                if !snap.head_hash.is_empty() {
+                    let short = if snap.head_hash.len() > 8 {
+                        &snap.head_hash[..8]
+                    } else {
+                        &snap.head_hash
+                    };
+                    out.push_str(&format!("- **HEAD at last run:** `{short}`\n"));
+                }
+            } else {
+                out.push_str("- _no runs yet — waiting for the first file change_\n");
+            }
+            if !snap.last_paths.is_empty() {
+                out.push_str("\n**Last batch paths**\n\n");
+                for p in &snap.last_paths {
+                    out.push_str(&format!("- `{p}`\n"));
+                }
+            }
+            if !snap.last_error.is_empty() {
+                out.push_str(&format!("\n**Last error:** `{}`\n", snap.last_error));
+            }
+        }
+    }
+    ok_text(out.trim_end().to_string())
+}
+
+/// Live status of the background indexer thread, observable via the
+/// `index_status` MCP tool. Wrapped in a `Mutex` so the dispatch loop and
+/// the watcher thread can both touch it.
+#[derive(Clone, Default)]
+struct IndexStatus {
+    /// `"idle"` | `"starting"` | `"running"`
+    state: String,
+    /// ISO-8601 timestamp of the last completed run.
+    last_run_at: String,
+    /// `"live"` | `"incremental"` | `"full"` | `"noop"` | `""` (never run).
+    last_run_mode: String,
+    last_run_duration_ms: u64,
+    /// Workspace-relative paths from the most recent debounced batch.
+    /// Capped — the agent uses these to confirm the right files were picked up.
+    last_paths: Vec<String>,
+    last_error: String,
+    runs_total: u64,
+    /// HEAD commit hash from the last successful run (or empty).
+    head_hash: String,
+}
+
+type SharedStatus = std::sync::Arc<std::sync::Mutex<IndexStatus>>;
+
+fn new_shared_status() -> SharedStatus {
+    std::sync::Arc::new(std::sync::Mutex::new(IndexStatus {
+        state: "idle".to_string(),
+        ..Default::default()
+    }))
+}
+
+/// Convert a sequence of absolute paths into workspace-relative path
+/// strings. Paths outside the workspace are dropped.
+fn rel_paths_from(workspace: &std::path::Path, abs: &[std::path::PathBuf]) -> Vec<String> {
+    abs.iter()
+        .filter_map(|p| p.strip_prefix(workspace).ok())
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect()
+}
+
 /// Spawn a background thread that watches `workspace` recursively and, on
-/// every debounced batch of indexable file changes, runs the indexer with
-/// `force_full=false`. Uses the same `Db` file as the MCP server; the
-/// existing `db_mtime`-based reopen logic picks up the writes.
+/// every debounced batch of indexable file changes, runs the indexer in
+/// **live mode** against the changed paths only. Status is mirrored into
+/// the shared `SharedStatus` so the `index_status` MCP tool can report it.
 ///
-/// Known limitation (v1): the indexer's incremental path uses `git diff`
-/// between the last indexed commit and HEAD. Uncommitted saves trigger a
-/// reindex pass but the pass itself sees nothing new and returns "noop".
-/// In practice this means watch mode auto-refreshes on `git commit`, not
-/// on save. Lifting this needs an explicit `reindex_paths(...)` API on
-/// the indexer.
-fn spawn_indexer_watcher(workspace: String, db_path: String, debounce_ms: u64) {
+/// Live mode skips git history (no `:GitCommit`/`:Author` writes) and the
+/// sidecar metadata bump, so uncommitted edits show up as a draft overlay
+/// without polluting the persistent revision history. The MCP server's
+/// `db_mtime`-based reopen logic picks up the new graph state on the next
+/// tool call.
+fn spawn_indexer_watcher(
+    workspace: String,
+    db_path: String,
+    debounce_ms: u64,
+    status: SharedStatus,
+) {
     use notify::{RecursiveMode, Watcher};
     use std::sync::mpsc::channel;
     use std::time::{Duration, Instant};
@@ -2560,11 +2658,14 @@ fn spawn_indexer_watcher(workspace: String, db_path: String, debounce_ms: u64) {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("[watch] cannot resolve workspace '{workspace}': {e}");
+                if let Ok(mut s) = status.lock() {
+                    s.last_error = format!("workspace canonicalize failed: {e}");
+                }
                 return;
             }
         };
         eprintln!(
-            "[watch] watching {} (debounce {}ms)",
+            "[watch] watching {} (debounce {}ms, live mode)",
             canonical.display(),
             debounce_ms
         );
@@ -2574,11 +2675,17 @@ fn spawn_indexer_watcher(workspace: String, db_path: String, debounce_ms: u64) {
             Ok(w) => w,
             Err(e) => {
                 eprintln!("[watch] could not create watcher: {e}");
+                if let Ok(mut s) = status.lock() {
+                    s.last_error = format!("watcher create failed: {e}");
+                }
                 return;
             }
         };
         if let Err(e) = watcher.watch(&canonical, RecursiveMode::Recursive) {
             eprintln!("[watch] could not start watching: {e}");
+            if let Ok(mut s) = status.lock() {
+                s.last_error = format!("watch start failed: {e}");
+            }
             return;
         }
         // Keep the watcher alive for the duration of this thread.
@@ -2604,27 +2711,66 @@ fn spawn_indexer_watcher(workspace: String, db_path: String, debounce_ms: u64) {
                 }
             }
             // Collect the relevant paths from this batch.
-            let mut indexable_paths: std::collections::BTreeSet<std::path::PathBuf> =
+            let mut indexable_abs: std::collections::BTreeSet<std::path::PathBuf> =
                 std::collections::BTreeSet::new();
             for ev in batch.iter().flatten() {
                 for p in &ev.paths {
                     if is_indexable_event_path(p) {
-                        indexable_paths.insert(p.clone());
+                        indexable_abs.insert(p.clone());
                     }
                 }
             }
-            if indexable_paths.is_empty() {
+            if indexable_abs.is_empty() {
                 continue;
             }
+            let abs_vec: Vec<std::path::PathBuf> = indexable_abs.into_iter().collect();
+            let rel_paths = rel_paths_from(&canonical, &abs_vec);
             eprintln!(
-                "[watch] {} indexable file(s) changed, triggering reindex",
-                indexable_paths.len()
+                "[watch] {} indexable file(s) changed: {}",
+                rel_paths.len(),
+                rel_paths
+                    .iter()
+                    .take(5)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
             );
-            let opts = codegraph_indexer::IndexOptions::new(canonical.clone(), &db_path);
-            match codegraph_indexer::run_indexer(opts) {
+
+            if let Ok(mut s) = status.lock() {
+                s.state = "running".to_string();
+                s.last_paths = rel_paths.iter().take(20).cloned().collect();
+            }
+            let started = Instant::now();
+            let opts = codegraph_indexer::IndexOptions::new(canonical.clone(), &db_path)
+                .with_paths(rel_paths.clone());
+            let result = codegraph_indexer::run_indexer(opts);
+            let elapsed = started.elapsed();
+
+            if let Ok(mut s) = status.lock() {
+                s.state = "idle".to_string();
+                s.last_run_at = chrono_now_iso();
+                s.last_run_duration_ms = elapsed.as_millis() as u64;
+                s.runs_total = s.runs_total.saturating_add(1);
+                match &result {
+                    Ok(stats) => {
+                        s.last_run_mode = stats.mode.to_string();
+                        s.head_hash = stats.head_hash.clone();
+                        s.last_error.clear();
+                    }
+                    Err(e) => {
+                        s.last_run_mode = "error".to_string();
+                        s.last_error = e.clone();
+                    }
+                }
+            }
+            match result {
                 Ok(stats) => eprintln!(
-                    "[watch] reindex done: mode={} symbols={} functions={} calls={}",
-                    stats.mode, stats.symbols, stats.functions, stats.call_edges
+                    "[watch] reindex done in {}ms: mode={} symbols={} functions={} calls={}",
+                    elapsed.as_millis(),
+                    stats.mode,
+                    stats.symbols,
+                    stats.functions,
+                    stats.call_edges
                 ),
                 Err(e) => eprintln!("[watch] reindex failed: {e}"),
             }
@@ -2680,8 +2826,9 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(500);
 
+    let status = new_shared_status();
     if let Some(ws) = &watch_path {
-        spawn_indexer_watcher(ws.clone(), db_path.clone(), debounce_ms);
+        spawn_indexer_watcher(ws.clone(), db_path.clone(), debounce_ms, status.clone());
     }
 
     let mut db = Db::open(&db_path).unwrap_or_else(|e| {
@@ -2756,6 +2903,7 @@ fn main() {
                     "define_concept" => handle_define_concept(&db, params),
                     "concept" => handle_concept(&db, params),
                     "list_concepts" => handle_list_concepts(&db),
+                    "index_status" => handle_index_status(&status, watch_path.as_deref()),
                     "import_pr_notes" => handle_import_pr_notes(&db, params),
                     "watch" => handle_watch(&db, params),
                     "unwatch" => handle_unwatch(&db, params),
@@ -2808,6 +2956,7 @@ mod tests {
             "define_concept",
             "concept",
             "list_concepts",
+            "index_status",
             "import_pr_notes",
             "watch",
             "unwatch",
@@ -2929,6 +3078,52 @@ mod tests {
         assert!(pos_hub < pos_leaf, "hub should outrank leaf:\n{md}");
         // degree tag rendered for non-zero degree
         assert!(md.contains("_(deg "), "degree tag missing:\n{md}");
+    }
+
+    #[test]
+    fn index_status_renders_stub_without_watch() {
+        let status = new_shared_status();
+        let v = handle_index_status(&status, None);
+        let md = text_of(&v);
+        assert!(md.contains("# Indexer status"), "{md}");
+        assert!(md.contains("not running"), "{md}");
+    }
+
+    #[test]
+    fn index_status_reflects_watcher_state() {
+        let status = new_shared_status();
+        // Simulate a completed run.
+        if let Ok(mut s) = status.lock() {
+            s.state = "idle".to_string();
+            s.last_run_at = "2026-05-15T18:55:00Z".to_string();
+            s.last_run_mode = "live".to_string();
+            s.last_run_duration_ms = 142;
+            s.runs_total = 7;
+            s.last_paths = vec!["src/lib.rs".into(), "README.md".into()];
+            s.head_hash = "abcd1234ef567890".into();
+        }
+        let md = text_of(&handle_index_status(&status, Some("/tmp/ws")));
+        assert!(md.contains("`/tmp/ws`"), "{md}");
+        assert!(md.contains("`idle`"), "{md}");
+        assert!(md.contains("`live`"), "{md}");
+        assert!(md.contains("142ms"), "{md}");
+        assert!(md.contains("Runs total:** 7"), "{md}");
+        assert!(md.contains("`abcd1234`"), "{md}");
+        assert!(md.contains("src/lib.rs"));
+        assert!(md.contains("README.md"));
+    }
+
+    #[test]
+    fn rel_paths_from_strips_workspace_prefix() {
+        let ws = std::path::PathBuf::from("/tmp/ws");
+        let abs = vec![
+            std::path::PathBuf::from("/tmp/ws/src/a.rs"),
+            std::path::PathBuf::from("/tmp/ws/docs/x.md"),
+            // Outside workspace ⇒ dropped.
+            std::path::PathBuf::from("/etc/passwd"),
+        ];
+        let rels = rel_paths_from(&ws, &abs);
+        assert_eq!(rels, vec!["src/a.rs".to_string(), "docs/x.md".into()]);
     }
 
     #[test]

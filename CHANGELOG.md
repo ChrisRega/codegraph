@@ -10,15 +10,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **`--watch <workspace>` mode for `codegraph-mcp`.** When set, the
   MCP server spawns a `notify`-based filesystem watcher that
-  re-runs the indexer (incremental mode) on a debounced batch of
-  file changes (default 500ms). The MCP server's existing `db_mtime`-
-  based reopen logic picks up the new graph state on the next tool
-  call. v1 limitation: triggers a noop until the user `git commit`s,
-  because the indexer's incremental path keys off `git diff`. The
-  full save-time path needs an explicit `reindex_paths()` indexer API
-  (planned). Pairs with the `codegraph-indexer` library refactor in
-  this release: `pub fn run_indexer(opts: IndexOptions) -> IndexStats`
-  is now callable from any embedder.
+  re-runs the indexer on a debounced batch of file changes (default
+  500ms). Uses **live mode** (`IndexOptions::with_paths`): only the
+  changed files are re-parsed, the git-history phase is skipped, and
+  the sidecar metadata is left untouched, so uncommitted edits show
+  up as a draft overlay without polluting the persistent revision
+  history. The MCP server's existing `db_mtime`-based reopen logic
+  picks up the new graph state on the next tool call.
+- **`index_status` MCP tool** — reports the live indexer's state
+  (`idle` / `running`), last-run mode + duration, the workspace-
+  relative paths from the most recent batch, and any error. Lets
+  the agent wait for `state == "idle"` after a save before issuing
+  fresh queries. Without `--watch`, returns a stub making the no-op
+  explicit.
+- **Indexer library refactor.** `pub fn run_indexer(opts: IndexOptions)
+  -> Result<IndexStats, String>` now drives the pipeline; the
+  `codegraph-indexer` binary is a ~60-line CLI wrapper. Embedders
+  use `IndexOptions::new(workspace, db).with_paths(rel_paths)` for
+  live-mode reindexing.
 - **`watch` / `unwatch` / `list_watches` MCP tools** + indexer Phase 7.
   Mark a node as watched: the next indexer run diffs the current
   `body` against the captured baseline, and on change attaches a
