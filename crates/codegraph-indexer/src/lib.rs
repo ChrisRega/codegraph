@@ -474,162 +474,26 @@ fn run_indexer_inner(opts: IndexOptions, pool: Option<&mut LspPool>) -> Result<I
     }
 
     // ── Phase 5: GitCommit + Author history ──────────────────────────────────
-    //
-    // Skipped in live mode — uncommitted edits don't deserve a `:GitCommit`
-    // node, and we'd just re-MERGE the existing HEAD on every save.
-    //
-    // Strategy:
-    //   * On a full reindex (or first-ever run) we backfill the last
-    //     `HISTORY_BACKFILL_LIMIT` commits reachable from HEAD.
-    //   * On an incremental run we walk only the commits between the
-    //     previously indexed HEAD and the new HEAD.
-    // Each commit becomes a `:GitCommit`, linked to its `:Author`, the
-    // `:Workspace`, and to its parents via `:PARENT_OF`. Re-using `MERGE`
-    // makes the operation idempotent across runs.
     if !head_hash.is_empty() && !is_live {
-        let range = match (&last_indexed_hash, is_full) {
-            (Some(prev), false) if prev != &head_hash => format!("{prev}..HEAD"),
-            _ => format!("-n {HISTORY_BACKFILL_LIMIT}"),
-        };
-        let commits = git_log_range(&workspace, &range);
-        eprintln!(
-            "  [+] History: recording {} commit{} in graph",
-            commits.len(),
-            if commits.len() == 1 { "" } else { "s" }
-        );
-        for c in &commits {
-            run(
-                &db,
-                &format!(
-                    "MERGE (a:Author {{email: {}}}) SET a.name = {}",
-                    escape_str(&c.author_email),
-                    escape_str(&c.author_name),
-                ),
-            );
-            run(
-                &db,
-                &format!(
-                    "MERGE (c:GitCommit {{hash: {}}}) \
-                     SET c.short_hash = {}, c.message = {}, c.timestamp = {}",
-                    escape_str(&c.hash),
-                    escape_str(&c.short_hash),
-                    escape_str(&c.message),
-                    escape_str(&c.timestamp),
-                ),
-            );
-            run(
-                &db,
-                &format!(
-                    "MATCH (a:Author {{email: {}}}), (c:GitCommit {{hash: {}}}) \
-                     MERGE (a)-[:AUTHORED]->(c)",
-                    escape_str(&c.author_email),
-                    escape_str(&c.hash),
-                ),
-            );
-            for parent in &c.parents {
-                // We may not have inserted the parent yet; create a stub.
-                run(
-                    &db,
-                    &format!("MERGE (:GitCommit {{hash: {}}})", escape_str(parent),),
-                );
-                run(
-                    &db,
-                    &format!(
-                        "MATCH (p:GitCommit {{hash: {}}}), (c:GitCommit {{hash: {}}}) \
-                         MERGE (p)-[:PARENT_OF]->(c)",
-                        escape_str(parent),
-                        escape_str(&c.hash),
-                    ),
-                );
-            }
-        }
-        // HEAD ↔ Workspace pointer: keep a single SNAPSHOT_OF on the head.
-        run(
+        phase_history(
             &db,
-            &format!(
-                "MATCH (c:GitCommit {{hash: {}}}), (w:Workspace {{name: {}}}) \
-                 MERGE (c)-[:SNAPSHOT_OF]->(w)",
-                escape_str(&head_hash),
-                escape_str(&ws_name),
-            ),
-        );
-
-        // first_seen / last_seen tagging on Files and Functions.
-        // last_seen is updated unconditionally; first_seen is only set if absent.
-        let head_lit = escape_str(&head_hash);
-        run(
-            &db,
-            &format!("MATCH (f:File) SET f.last_seen_commit = {head_lit}"),
-        );
-        run(
-            &db,
-            &format!(
-                "MATCH (f:File) WHERE f.first_seen_commit IS NULL \
-                 SET f.first_seen_commit = {head_lit}"
-            ),
-        );
-        run(
-            &db,
-            &format!("MATCH (f:Function) SET f.last_seen_commit = {head_lit}"),
-        );
-        run(
-            &db,
-            &format!(
-                "MATCH (f:Function) WHERE f.first_seen_commit IS NULL \
-                 SET f.first_seen_commit = {head_lit}"
-            ),
+            &workspace,
+            &head_hash,
+            &ws_name,
+            last_indexed_hash.as_deref(),
+            is_full,
         );
     }
 
     // ── Phase 6: tag tests + materialise [:TESTS] edges ──────────────────────
-    //
-    // Heuristic: a `:Function` whose body contains `#[test]` or
-    // `#[tokio::test]` (LSP `documentSymbol` ranges include the attributes)
-    // is also a `:Test`. Then for every existing `[:CALLS]` edge from a test
-    // to a non-test, materialise a `[:TESTS]` edge. The result is a
-    // partial-but-honest test↔code wiring derivable purely from existing
-    // index data — no new parser passes.
-    {
-        // velr 0.2.16: `WHERE a OR b` rewrites to UNION which applies SET
-        // to *all* unioned rows, defeating the filter. Split into two stmts.
-        run(
-            &db,
-            "MATCH (f:Function) WHERE f.body CONTAINS '#[test]' SET f:Test",
-        );
-        run(
-            &db,
-            "MATCH (f:Function) WHERE f.body CONTAINS '#[tokio::test]' SET f:Test",
-        );
-        // Wipe stale TESTS edges before re-deriving.
-        run(&db, "MATCH ()-[r:TESTS]->() DELETE r");
-        run(
-            &db,
-            "MATCH (t:Test)-[:CALLS]->(f:Function) WHERE NOT f:Test CREATE (t)-[:TESTS]->(f)",
-        );
-    }
+    phase_test_tagging(&db);
 
     // ── Phase 7: fire watch triggers ─────────────────────────────────────────
-    //
-    // For every `:Watch` node whose current `body` differs from the baseline
-    // captured at watch time, write a `:Note` (tagged `watch-trigger`) under
-    // the node and then re-baseline. This is the asynchronous, cross-session
-    // notification mechanism: the next time someone calls `node_md` on a
-    // watched function, the dossier surfaces the change automatically.
-    fire_watch_triggers(&db, &head_hash);
+    phase_watch_triggers(&db, &head_hash);
 
     // ── Persist sidecar metadata ─────────────────────────────────────────────
-    // Skipped in live mode — the sidecar tracks the last *committed* pass
-    // so the next CLI/Auto run still picks up where it left off.
     if !head_hash.is_empty() && !is_live {
-        if let Err(e) = meta::save(
-            &meta_path,
-            &meta::Meta {
-                last_commit: head_hash.clone(),
-                indexed_at: chrono_now_iso(),
-            },
-        ) {
-            eprintln!("  [!] Could not write sidecar metadata: {e}");
-        }
+        save_sidecar(&meta_path, &head_hash);
     }
 
     let mode = if is_live {
@@ -652,6 +516,158 @@ fn run_indexer_inner(opts: IndexOptions, pool: Option<&mut LspPool>) -> Result<I
         call_edges: call_edges as usize,
         head_hash,
     })
+}
+
+// ── Phase helpers (extracted from `run_indexer_inner`) ───────────────────────
+
+/// Phase 5 — record `:GitCommit` + `:Author` history and tag
+/// `first_seen_commit` / `last_seen_commit` on `:File` and `:Function`.
+///
+/// Skipped in live mode by the orchestrator (uncommitted edits don't deserve
+/// a `:GitCommit` node, and we'd just re-MERGE the existing HEAD on every
+/// save).
+///
+/// Strategy:
+///   * On a full reindex (or first-ever run) backfill the last
+///     `HISTORY_BACKFILL_LIMIT` commits reachable from HEAD.
+///   * On an incremental run walk only the commits between the previously
+///     indexed HEAD and the new HEAD.
+fn phase_history(
+    db: &Db,
+    workspace: &Path,
+    head_hash: &str,
+    ws_name: &str,
+    last_indexed_hash: Option<&str>,
+    is_full: bool,
+) {
+    let range = match (last_indexed_hash, is_full) {
+        (Some(prev), false) if prev != head_hash => format!("{prev}..HEAD"),
+        _ => format!("-n {HISTORY_BACKFILL_LIMIT}"),
+    };
+    let commits = git_log_range(workspace, &range);
+    eprintln!(
+        "  [+] History: recording {} commit{} in graph",
+        commits.len(),
+        if commits.len() == 1 { "" } else { "s" }
+    );
+    for c in &commits {
+        run(
+            db,
+            &format!(
+                "MERGE (a:Author {{email: {}}}) SET a.name = {}",
+                escape_str(&c.author_email),
+                escape_str(&c.author_name),
+            ),
+        );
+        run(
+            db,
+            &format!(
+                "MERGE (c:GitCommit {{hash: {}}}) \
+                 SET c.short_hash = {}, c.message = {}, c.timestamp = {}",
+                escape_str(&c.hash),
+                escape_str(&c.short_hash),
+                escape_str(&c.message),
+                escape_str(&c.timestamp),
+            ),
+        );
+        run(
+            db,
+            &format!(
+                "MATCH (a:Author {{email: {}}}), (c:GitCommit {{hash: {}}}) \
+                 MERGE (a)-[:AUTHORED]->(c)",
+                escape_str(&c.author_email),
+                escape_str(&c.hash),
+            ),
+        );
+        for parent in &c.parents {
+            run(
+                db,
+                &format!("MERGE (:GitCommit {{hash: {}}})", escape_str(parent),),
+            );
+            run(
+                db,
+                &format!(
+                    "MATCH (p:GitCommit {{hash: {}}}), (c:GitCommit {{hash: {}}}) \
+                     MERGE (p)-[:PARENT_OF]->(c)",
+                    escape_str(parent),
+                    escape_str(&c.hash),
+                ),
+            );
+        }
+    }
+    // HEAD ↔ Workspace pointer: keep a single SNAPSHOT_OF on the head.
+    run(
+        db,
+        &format!(
+            "MATCH (c:GitCommit {{hash: {}}}), (w:Workspace {{name: {}}}) \
+             MERGE (c)-[:SNAPSHOT_OF]->(w)",
+            escape_str(head_hash),
+            escape_str(ws_name),
+        ),
+    );
+
+    // first_seen / last_seen tagging on Files and Functions.
+    let head_lit = escape_str(head_hash);
+    run(
+        db,
+        &format!("MATCH (f:File) SET f.last_seen_commit = {head_lit}"),
+    );
+    run(
+        db,
+        &format!(
+            "MATCH (f:File) WHERE f.first_seen_commit IS NULL \
+             SET f.first_seen_commit = {head_lit}"
+        ),
+    );
+    run(
+        db,
+        &format!("MATCH (f:Function) SET f.last_seen_commit = {head_lit}"),
+    );
+    run(
+        db,
+        &format!(
+            "MATCH (f:Function) WHERE f.first_seen_commit IS NULL \
+             SET f.first_seen_commit = {head_lit}"
+        ),
+    );
+}
+
+/// Phase 6 — tag every `:Function` whose body contains `#[test]` or
+/// `#[tokio::test]` with `:Test`, then materialise `[:TESTS]` from each
+/// test fn to every non-test it `[:CALLS]`.
+///
+/// velr 0.2.16: `WHERE a OR b` rewrites to UNION which applies SET to all
+/// unioned rows, defeating the filter. Two single-CONTAINS statements
+/// instead.
+fn phase_test_tagging(db: &Db) {
+    run(
+        db,
+        "MATCH (f:Function) WHERE f.body CONTAINS '#[test]' SET f:Test",
+    );
+    run(
+        db,
+        "MATCH (f:Function) WHERE f.body CONTAINS '#[tokio::test]' SET f:Test",
+    );
+    run(db, "MATCH ()-[r:TESTS]->() DELETE r");
+    run(
+        db,
+        "MATCH (t:Test)-[:CALLS]->(f:Function) WHERE NOT f:Test CREATE (t)-[:TESTS]->(f)",
+    );
+}
+
+/// Persist sidecar metadata so the next CLI/Auto run starts from the
+/// commit we just indexed. Skipped in live mode by the orchestrator —
+/// the sidecar only tracks the last *committed* pass.
+fn save_sidecar(meta_path: &Path, head_hash: &str) {
+    if let Err(e) = meta::save(
+        meta_path,
+        &meta::Meta {
+            last_commit: head_hash.to_string(),
+            indexed_at: chrono_now_iso(),
+        },
+    ) {
+        eprintln!("  [!] Could not write sidecar metadata: {e}");
+    }
 }
 
 // ── Git helpers ──────────────────────────────────────────────────────────────
@@ -1558,7 +1574,7 @@ fn emit_python_dep(db: &Db, pkg_name: &str, dep_name: &str, kind: &str) {
 /// `watch_baseline_body`, and on mismatch attach a `:Note` describing the
 /// change before re-baselining. Best-effort: a per-node failure is logged
 /// to stderr but does not abort indexing.
-fn fire_watch_triggers(db: &Db, head_hash: &str) {
+fn phase_watch_triggers(db: &Db, head_hash: &str) {
     let q = "MATCH (w:Watch) \
              WHERE w.watch_baseline_body IS NOT NULL AND w.body IS NOT NULL \
                    AND w.body <> w.watch_baseline_body \
@@ -1807,16 +1823,8 @@ mod tests {
         )
         .unwrap();
 
-        // Phase-6 statements (verbatim from main). The OR is split into two
-        // statements because velr 0.2.16 rewrites `WHERE a OR b` into a UNION
-        // and applies SET to all rows of the unioned result.
-        db.run("MATCH (f:Function) WHERE f.body CONTAINS '#[test]' SET f:Test")
-            .unwrap();
-        db.run("MATCH (f:Function) WHERE f.body CONTAINS '#[tokio::test]' SET f:Test")
-            .unwrap();
-        db.run("MATCH ()-[r:TESTS]->() DELETE r").unwrap();
-        db.run("MATCH (t:Test)-[:CALLS]->(f:Function) WHERE NOT f:Test CREATE (t)-[:TESTS]->(f)")
-            .unwrap();
+        // Drive the actual phase function — this is the contract test.
+        phase_test_tagging(&db);
 
         // Both test fns now carry the :Test label.
         let t = db
@@ -1842,7 +1850,7 @@ mod tests {
     /// Watch trigger fires when body differs from baseline; subsequent runs
     /// without further change are no-ops (re-baseline took effect).
     #[test]
-    fn fire_watch_triggers_creates_note_and_rebaselines() {
+    fn phase_watch_triggers_creates_note_and_rebaselines() {
         let db = codegraph_core::Db::open_in_memory().unwrap();
         // A watched function with mismatched body / baseline.
         db.run(
@@ -1855,7 +1863,7 @@ mod tests {
         db.run("CREATE (:Function {qualified_name: 'm::bar', name: 'bar', body: 'fn bar() {}'})")
             .unwrap();
 
-        fire_watch_triggers(&db, "bbb22222");
+        phase_watch_triggers(&db, "bbb22222");
 
         // Note attached to foo
         let t = db
@@ -1877,7 +1885,7 @@ mod tests {
         assert_eq!(t2.rows[0][0].as_str().unwrap_or(""), "fn foo() { 2 }");
 
         // Second run with no further change ⇒ no new notes.
-        fire_watch_triggers(&db, "ccc33333");
+        phase_watch_triggers(&db, "ccc33333");
         let t3 = db
             .query("MATCH (n:Note)-[:NOTES]->(f:Function {qualified_name: 'm::foo'}) RETURN count(n) AS c")
             .unwrap();

@@ -90,7 +90,21 @@ Replace with `let (label, key, value) = parse_node_address(params)?;`.
 
 ## Tier 2 — architecture (2–3 commits, medium risk)
 
-### 2a. Split `run_indexer_inner` into phase functions
+### 2a. Split `run_indexer_inner` into phase functions — **partial**
+
+Done: extracted `phase_history` (Phase 5, ~95 LoC), `phase_test_tagging`
+(Phase 6), `phase_watch_triggers` (renamed from `fire_watch_triggers`
+for naming consistency), and `save_sidecar` into named helpers. The
+orchestrator's tail dropped from ~145 LoC inline to ~10 LoC of named
+calls. Existing `phase6_tags_tests_and_links_them` test now drives
+`phase_test_tagging` directly instead of duplicating the SQL — proper
+contract test.
+
+Deferred: extracting Phase 1+2 (workspace + packages + LSP file-wipe)
+and Phase 3+4 (LSP indexing). Those are entangled with the
+pool-vs-transient branch and need an `IndexCtx` struct to factor
+cleanly. Not worth doing without a concrete next caller that needs
+them isolated.
 
 Target shape (signature sketch — bodies move, behaviour stays):
 
@@ -114,20 +128,17 @@ pub fn run_indexer_inner(opts, pool) -> Result<IndexStats> {
 Each `phase_*` is independently testable against an in-memory DB plus
 a minimal `IndexCtx`. Ordering stays explicit at the call site.
 
-### 2b. `tools::Ctx` struct
+### 2b. `tools::Ctx` struct — **deferred**
 
-```rust
-pub struct Ctx<'a> {
-    pub db: &'a Db,
-    pub tx: &'a mut TxState,
-    pub status: &'a SharedStatus,
-    pub watch_path: Option<&'a str>,
-}
-```
+Reviewing the dispatcher: most handlers are already `(db, params)` and a
+few are `(db, tx, params)` — the argument-threading isn't actually
+painful at this scope. Wrapping them in a `Ctx` struct earns its keep
+only when we want cross-cutting concerns (per-call timing, logging,
+tracing) executed in one place around dispatch. We don't yet, so
+introducing the indirection now would be busywork.
 
-All handlers take `(ctx, params)`. Kills the repetitive argument
-threading and makes future cross-cutting concerns (per-call timing,
-logging, tracing) trivial to wire in one place.
+Pulled forward when we add the first cross-cutting concern (likely
+per-call timing surfaced via `index_status`-style introspection).
 
 ## Tier 3 — nice-to-have (defer)
 
