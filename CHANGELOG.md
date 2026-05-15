@@ -8,6 +8,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`:Test` label + `[:TESTS]` edges.** A post-LSP indexer phase tags
+  every `:Function` whose body contains `#[test]` or `#[tokio::test]`
+  with a `:Test` label, then materialises `(:Test)-[:TESTS]->(:Function)`
+  for every `[:CALLS]` from a test into a non-test. Lets queries
+  cleanly answer "which functions are tested?" and "which test covers
+  this code?".
 - **Ranked neighbours in `node_md`** — within each edge group,
   neighbours are now sorted by total degree (in + out) descending so
   the per-group cap surfaces the most load-bearing nodes first. Each

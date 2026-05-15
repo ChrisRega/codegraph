@@ -489,6 +489,33 @@ fn main() {
         );
     }
 
+    // ── Phase 6: tag tests + materialise [:TESTS] edges ──────────────────────
+    //
+    // Heuristic: a `:Function` whose body contains `#[test]` or
+    // `#[tokio::test]` (LSP `documentSymbol` ranges include the attributes)
+    // is also a `:Test`. Then for every existing `[:CALLS]` edge from a test
+    // to a non-test, materialise a `[:TESTS]` edge. The result is a
+    // partial-but-honest test↔code wiring derivable purely from existing
+    // index data — no new parser passes.
+    {
+        // velr 0.2.16: `WHERE a OR b` rewrites to UNION which applies SET
+        // to *all* unioned rows, defeating the filter. Split into two stmts.
+        run(
+            &db,
+            "MATCH (f:Function) WHERE f.body CONTAINS '#[test]' SET f:Test",
+        );
+        run(
+            &db,
+            "MATCH (f:Function) WHERE f.body CONTAINS '#[tokio::test]' SET f:Test",
+        );
+        // Wipe stale TESTS edges before re-deriving.
+        run(&db, "MATCH ()-[r:TESTS]->() DELETE r");
+        run(
+            &db,
+            "MATCH (t:Test)-[:CALLS]->(f:Function) WHERE NOT f:Test CREATE (t)-[:TESTS]->(f)",
+        );
+    }
+
     // ── Persist sidecar metadata ─────────────────────────────────────────────
     if !head_hash.is_empty() {
         if let Err(e) = meta::save(
@@ -1488,5 +1515,69 @@ mod tests {
             assert_eq!(c.author_email, "test@example.com");
             assert!(!c.short_hash.is_empty() && c.short_hash.len() < c.hash.len());
         }
+    }
+
+    /// Verify the Phase-6 Cypher tags `:Test` and materialises `[:TESTS]`
+    /// edges from a body-content heuristic, mirroring what runs at the end
+    /// of `main`.
+    #[test]
+    fn phase6_tags_tests_and_links_them() {
+        let db = codegraph_core::Db::open_in_memory().unwrap();
+        // A test fn (with the attribute in the body), a regular fn, and a
+        // tokio test.
+        db.run(
+            "CREATE (:Function {qualified_name: 'm::test_foo', name: 'test_foo', \
+             body: '#[test]\\nfn test_foo() { foo(); }'})",
+        )
+        .unwrap();
+        db.run("CREATE (:Function {qualified_name: 'm::foo', name: 'foo', body: 'fn foo() {}'})")
+            .unwrap();
+        db.run(
+            "CREATE (:Function {qualified_name: 'm::test_async', name: 'test_async', \
+             body: '#[tokio::test]\\nasync fn test_async() { foo(); }'})",
+        )
+        .unwrap();
+        // The CALLS edges that the LSP pass would have produced.
+        db.run(
+            "MATCH (a:Function {qualified_name: 'm::test_foo'}), \
+                   (b:Function {qualified_name: 'm::foo'}) CREATE (a)-[:CALLS]->(b)",
+        )
+        .unwrap();
+        db.run(
+            "MATCH (a:Function {qualified_name: 'm::test_async'}), \
+                   (b:Function {qualified_name: 'm::foo'}) CREATE (a)-[:CALLS]->(b)",
+        )
+        .unwrap();
+
+        // Phase-6 statements (verbatim from main). The OR is split into two
+        // statements because velr 0.2.16 rewrites `WHERE a OR b` into a UNION
+        // and applies SET to all rows of the unioned result.
+        db.run("MATCH (f:Function) WHERE f.body CONTAINS '#[test]' SET f:Test")
+            .unwrap();
+        db.run("MATCH (f:Function) WHERE f.body CONTAINS '#[tokio::test]' SET f:Test")
+            .unwrap();
+        db.run("MATCH ()-[r:TESTS]->() DELETE r").unwrap();
+        db.run("MATCH (t:Test)-[:CALLS]->(f:Function) WHERE NOT f:Test CREATE (t)-[:TESTS]->(f)")
+            .unwrap();
+
+        // Both test fns now carry the :Test label.
+        let t = db
+            .query("MATCH (n:Test) RETURN n.qualified_name AS qn ORDER BY qn")
+            .unwrap();
+        let names: Vec<String> = t
+            .rows
+            .iter()
+            .filter_map(|r| r.first().and_then(|c| c.as_str()).map(str::to_string))
+            .collect();
+        assert_eq!(
+            names,
+            vec!["m::test_async".to_string(), "m::test_foo".into()]
+        );
+
+        // foo received TESTS edges from both tests; nothing else.
+        let t = db
+            .query("MATCH (a)-[:TESTS]->(b) RETURN a.qualified_name AS a, b.qualified_name AS b ORDER BY a")
+            .unwrap();
+        assert_eq!(t.rows.len(), 2);
     }
 }

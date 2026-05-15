@@ -123,7 +123,7 @@ for, with the lowest-token answer for each question shape.
 - [x] **H5** — Ranked neighbours in `node_md`. Sort outgoing /
   incoming edges by importance (fan-in/out, recent commit churn) and
   cap at top-N per edge type. Hubs no longer blow up the dossier.
-- [ ] **H6** — `:Test` label + `[:TESTS]` edge. Discover Rust
+- [x] **H6** — `:Test` label + `[:TESTS]` edge. Discover Rust
   `#[test]` / `#[tokio::test]` functions and link them to the
   function-under-test where derivable. Enables "what changed without
   test coverage" queries.

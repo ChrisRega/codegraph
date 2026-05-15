@@ -164,3 +164,31 @@ Each entry: feature, what I reached for, what I wished existed.
 - **Tests:** `node_md_ranks_neighbours_by_degree` (5-node setup with
   one hub, asserts the hub appears before the leaf in the rendered
   Markdown and the `_(deg N)_` tag is present). mcp suite 23/23.
+
+## H6 — `:Test` label and `[:TESTS]` edges
+
+- **Reached for:** `grep -n 'body\|line_start' lsp_index.rs` to confirm
+  the LSP body slice includes attribute lines (it does — rust-analyzer
+  emits `documentSymbol.range` covering the attributes). Without that
+  shape, the body-CONTAINS heuristic would silently miss every test.
+- **velr surprise #2 (compounding the H4 surprise):** `MATCH (f) WHERE
+  body CONTAINS 'A' OR body CONTAINS 'B' SET f:Test` applies the SET
+  to *every* row in the unioned result, not just the WHERE-matching
+  ones. velr 0.2.16's planner rewrites `WHERE a OR b` to a UNION and
+  then SET fans out across the lot. Worked around by splitting into
+  two single-CONTAINS statements. This OR→UNION quirk has now bitten
+  me twice (H4, H6); writing it down in `docs/velr-notes.md` is
+  overdue but out of scope for this commit.
+- **Test caught the bug:** I shipped the OR-form first, the test
+  immediately reported `m::foo` (a non-test) tagged. Without the test
+  this would have been a silent correctness regression in production
+  data. Lesson reinforced: every Cypher post-processing step needs a
+  unit test, no matter how short.
+- **Honest scope:** `[:TESTS]` is derived from `[:CALLS]` only, so a
+  test that asserts on a static value without calling anything won't
+  produce edges. Doc says so. A future pass could attribute test
+  effects via macro expansion, but that's a different project.
+- **Tests:** `phase6_tags_tests_and_links_them` (3 functions: a sync
+  test, a tokio test, and a regular fn; asserts the right two carry
+  `:Test` and exactly two `[:TESTS]` edges land on the right target).
+  Workspace 36/36.

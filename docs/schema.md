@@ -81,6 +81,16 @@ Catch-all for non-function declarations LSP returns: `Struct`, `Enum`,
 `Interface`, `TypeParameter`, `Constant`, `Variable`. Property set
 matches `:Function` minus the call-graph-specific fields.
 
+### `:Test` (a label *added* to `:Function`)
+
+After the LSP pass, the indexer tags every `:Function` whose body
+contains `#[test]` or `#[tokio::test]` with an additional `:Test`
+label, and materialises `(:Test)-[:TESTS]->(:Function)` for every
+existing `[:CALLS]` edge from a test into a non-test. This is a
+heuristic — it relies on rust-analyzer's `documentSymbol` ranges
+including the attribute lines (which they currently do). Languages
+without attribute-style test markers will need their own pass.
+
 ### `:Field`, `:Parameter`, `:Import`
 
 Reserved labels — currently emitted only by API-spec scanners (`:Field`)
@@ -185,6 +195,7 @@ OpenAPI operations / GraphQL SDL types / Protobuf RPCs and messages.
 | `LINKS_TO` | DocSection → File | resolved `[text](path)` links |
 | `HAS_SCENARIO`, `HAS_STEP` | Feature → Scenario, Scenario → Step | |
 | `IMPLEMENTED_BY` | Step → Function | regex match of `Step.text` against `Function.step_regex` |
+| `TESTS` | Test → Function | derived from `[:CALLS]` where the source carries `:Test` and the target does not |
 | `EXPOSES` | Package → APIEndpoint or APIType | API specs |
 | `USES_SCHEMA` | APIEndpoint → APIType | OpenAPI `$ref`s |
 | `HAS_FIELD` | APIType → Field | |
