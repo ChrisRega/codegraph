@@ -34,20 +34,25 @@ mod concepts;
 mod coverage;
 mod diff;
 mod explore;
+mod history;
+mod notes;
 mod render;
 mod tx;
 mod util;
+mod views;
 mod watch;
 use concepts::{handle_concept, handle_define_concept, handle_list_concepts};
 use coverage::handle_coverage_md;
 use diff::handle_diff_since;
 use explore::handle_explore;
+use history::handle_history;
+use notes::{handle_list_notes, handle_write_note};
 use render::{format_table, format_table_md, md_cell, render_neighbours, render_notes_rows};
 use tx::{handle_begin, handle_commit, handle_rollback, handle_write, TxState};
 use util::{
     chrono_now_iso, err_text, ok_text, parse_node_address, parse_node_address_with_defaults,
-    safe_name_with_dashes,
 };
+use views::{handle_list_views, handle_save_view, handle_view};
 use watch::{handle_index_status, new_shared_status, spawn_indexer_watcher};
 
 #[derive(Deserialize)]
@@ -581,172 +586,7 @@ fn handle_node_md(db: &Db, params: &Value) -> Value {
 
 // `neighbour_degrees` and `render_neighbours` moved to `render` — see refactoring 1a.
 
-fn handle_write_note(db: &Db, params: &Value) -> Value {
-    let match_clause = match params.get("match").and_then(|v| v.as_str()) {
-        Some(s) if !s.trim().is_empty() => s.to_string(),
-        _ => return err_text("missing required argument: match".to_string()),
-    };
-    let markdown = match params.get("markdown").and_then(|v| v.as_str()) {
-        Some(s) => s.to_string(),
-        None => return err_text("missing required argument: markdown".to_string()),
-    };
-    let title = params
-        .get("title")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let author = params
-        .get("author")
-        .and_then(|v| v.as_str())
-        .unwrap_or("claude")
-        .to_string();
-    let tags = params
-        .get("tags")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-
-    // Lightweight guard: the user-supplied MATCH must bind variable `t`.
-    let lower = match_clause.to_lowercase();
-    if !lower.contains("match") || !match_clause.contains('t') {
-        return err_text("`match` must be a Cypher MATCH clause that binds variable `t`".into());
-    }
-
-    let now = chrono_now_iso();
-    let note_id = format!("note-{}", now.replace([':', '.'], "-"));
-
-    // Create the note node + attach via :NOTES edge to every target.
-    let q = format!(
-        "{match_clause} \
-         MERGE (n:Note {{id: {id}}}) \
-         SET n.title = {title}, n.author = {author}, n.tags = {tags}, \
-             n.created_at = {created}, n.markdown = {md} \
-         CREATE (n)-[:NOTES]->(t)",
-        id = escape_str(&note_id),
-        title = escape_str(&title),
-        author = escape_str(&author),
-        tags = escape_str(&tags),
-        created = escape_str(&now),
-        md = escape_str(&markdown),
-    );
-    if let Err(e) = db.run(&q) {
-        return err_text(format!("note write failed: {e}"));
-    }
-
-    // Count how many targets got the note.
-    let count_q = format!(
-        "MATCH (n:Note {{id: {}}})-[:NOTES]->(x) RETURN count(x) AS c",
-        escape_str(&note_id)
-    );
-    let attached = db
-        .query(&count_q)
-        .ok()
-        .and_then(|t| t.rows.into_iter().next())
-        .and_then(|r| r.into_iter().next())
-        .and_then(|c| c.as_i64())
-        .unwrap_or(0);
-
-    if attached == 0 {
-        // No target matched — clean up the orphan note so we don't accumulate junk.
-        let _ = db.run(&format!(
-            "MATCH (n:Note {{id: {}}}) DETACH DELETE n",
-            escape_str(&note_id)
-        ));
-        return err_text(
-            "MATCH bound no targets — note discarded. Verify your MATCH clause first with `cypher`.".into(),
-        );
-    }
-    ok_text(format!(
-        "wrote note `{note_id}` attached to {attached} target{}",
-        if attached == 1 { "" } else { "s" }
-    ))
-}
-
-fn handle_list_notes(db: &Db, params: &Value) -> Value {
-    let limit = params
-        .get("limit")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(50)
-        .max(1);
-    let q = match params.get("match").and_then(|v| v.as_str()) {
-        Some(s) if !s.trim().is_empty() => format!(
-            "{s} \
-             MATCH (note:Note)-[:NOTES]->(t) \
-             RETURN DISTINCT note.id AS id, note.title AS title, note.author AS author, \
-                    note.created_at AS created_at, note.tags AS tags, note.markdown AS markdown \
-             ORDER BY note.created_at DESC LIMIT {limit}"
-        ),
-        _ => format!(
-            "MATCH (note:Note) \
-             RETURN note.id AS id, note.title AS title, note.author AS author, \
-                    note.created_at AS created_at, note.tags AS tags, note.markdown AS markdown \
-             ORDER BY note.created_at DESC LIMIT {limit}"
-        ),
-    };
-    let t = match db.query(&q) {
-        Ok(t) => t,
-        Err(e) => return err_text(format!("list_notes query failed: {e}")),
-    };
-    if t.rows.is_empty() {
-        return ok_text("_(no notes)_".to_string());
-    }
-    let mut out = String::new();
-    out.push_str(&format!("# Notes ({})\n\n", t.rows.len()));
-    out.push_str(&render_notes_rows(&t));
-    ok_text(out.trim_end().to_string())
-}
-
 // `render_notes_rows` moved to `render` — see refactoring 1a.
-
-fn handle_history(db: &Db, params: &Value) -> Value {
-    let limit = params
-        .get("limit")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(50)
-        .max(1);
-    let q = format!(
-        "MATCH (c:GitCommit) \
-         OPTIONAL MATCH (a:Author)-[:AUTHORED]->(c) \
-         RETURN c.short_hash AS short, c.timestamp AS ts, a.name AS author, c.message AS message \
-         ORDER BY c.timestamp DESC LIMIT {limit}"
-    );
-    let t = match db.query(&q) {
-        Ok(t) => t,
-        Err(e) => return err_text(format!("history query failed: {e}")),
-    };
-    if t.rows.is_empty() {
-        return ok_text(
-            "_(no `:GitCommit` nodes recorded — run the indexer inside a git repo)_".to_string(),
-        );
-    }
-    let mut out = String::new();
-    out.push_str(&format!("# Indexed commits ({})\n\n", t.rows.len()));
-    out.push_str("| short | timestamp | author | message |\n| --- | --- | --- | --- |\n");
-    let s_i = t.col("short");
-    let ts_i = t.col("ts");
-    let a_i = t.col("author");
-    let m_i = t.col("message");
-    for row in &t.rows {
-        let s = s_i
-            .and_then(|i| row.get(i))
-            .map(md_cell)
-            .unwrap_or_default();
-        let ts = ts_i
-            .and_then(|i| row.get(i))
-            .map(md_cell)
-            .unwrap_or_default();
-        let a = a_i
-            .and_then(|i| row.get(i))
-            .map(md_cell)
-            .unwrap_or_default();
-        let m = m_i
-            .and_then(|i| row.get(i))
-            .map(md_cell)
-            .unwrap_or_default();
-        out.push_str(&format!("| `{s}` | {ts} | {a} | {m} |\n"));
-    }
-    ok_text(out.trim_end().to_string())
-}
 
 // ── watch / unwatch ───────────────────────────────────────────────────────────
 
@@ -1016,169 +856,6 @@ fn handle_import_pr_notes(db: &Db, params: &Value) -> Value {
         "Processed {comments_processed} comments, scanned {symbols_seen} backticked tokens, \
          created {notes_created} notes attached to {total_attached} `:Function` targets."
     ))
-}
-
-// ── saved views ───────────────────────────────────────────────────────────────
-// `safe_name_with_dashes` moved to `util` module — see refactoring 1a.
-
-/// Substitute `$key` tokens in `cypher` with `escape_str(value)` for each
-/// `(key, value)` in `params`. Tokens are matched as `$` followed by an
-/// identifier-shaped run (`[A-Za-z_][A-Za-z0-9_]*`); unknown tokens stay.
-fn substitute_view_params(cypher: &str, params: &serde_json::Map<String, Value>) -> String {
-    let bytes = cypher.as_bytes();
-    let mut out = String::with_capacity(cypher.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        let c = bytes[i];
-        if c == b'$' && i + 1 < bytes.len() {
-            let start = i + 1;
-            let mut end = start;
-            if end < bytes.len() && (bytes[end].is_ascii_alphabetic() || bytes[end] == b'_') {
-                end += 1;
-                while end < bytes.len()
-                    && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_')
-                {
-                    end += 1;
-                }
-                let key = &cypher[start..end];
-                if let Some(v) = params.get(key) {
-                    let s = match v {
-                        Value::String(s) => s.clone(),
-                        Value::Number(n) => n.to_string(),
-                        Value::Bool(b) => b.to_string(),
-                        Value::Null => "null".to_string(),
-                        other => other.to_string(),
-                    };
-                    out.push_str(&escape_str(&s));
-                    i = end;
-                    continue;
-                }
-            }
-        }
-        out.push(c as char);
-        i += 1;
-    }
-    out
-}
-
-fn handle_save_view(db: &Db, params: &Value) -> Value {
-    let name = match params.get("name").and_then(|v| v.as_str()) {
-        Some(s) if safe_name_with_dashes(s) => s.to_string(),
-        Some(s) => return err_text(format!("invalid view name: {s:?}")),
-        None => return err_text("missing required argument: name".to_string()),
-    };
-    let cypher = match params.get("cypher").and_then(|v| v.as_str()) {
-        Some(s) if !s.trim().is_empty() => s.to_string(),
-        _ => return err_text("missing required argument: cypher".to_string()),
-    };
-    let description = params
-        .get("description")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let now = chrono_now_iso();
-    let q = format!(
-        "MERGE (v:View {{name: {name}}}) \
-         SET v.cypher = {cypher}, v.description = {desc}, v.updated_at = {now}, \
-             v.created_at = coalesce(v.created_at, {now})",
-        name = escape_str(&name),
-        cypher = escape_str(&cypher),
-        desc = escape_str(&description),
-        now = escape_str(&now),
-    );
-    if let Err(e) = db.run(&q) {
-        return err_text(format!("save_view failed: {e}"));
-    }
-    ok_text(format!("saved view `{name}`"))
-}
-
-fn handle_view(db: &Db, params: &Value) -> Value {
-    let name = match params.get("name").and_then(|v| v.as_str()) {
-        Some(s) if safe_name_with_dashes(s) => s.to_string(),
-        Some(s) => return err_text(format!("invalid view name: {s:?}")),
-        None => return err_text("missing required argument: name".to_string()),
-    };
-    let lookup = format!(
-        "MATCH (v:View {{name: {n}}}) RETURN v.cypher AS cypher LIMIT 1",
-        n = escape_str(&name),
-    );
-    let cypher_template = match db.query(&lookup) {
-        Ok(t) if !t.rows.is_empty() => t.rows[0]
-            .first()
-            .and_then(|c| c.as_str())
-            .unwrap_or("")
-            .to_string(),
-        Ok(_) => return ok_text(format!("_(no view named `{name}`)_")),
-        Err(e) => return err_text(format!("view lookup failed: {e}")),
-    };
-    let empty = serde_json::Map::new();
-    let map = params
-        .get("params")
-        .and_then(|v| v.as_object())
-        .unwrap_or(&empty);
-    let cypher = substitute_view_params(&cypher_template, map);
-
-    let now = chrono_now_iso();
-    let _ = db.run(&format!(
-        "MATCH (v:View {{name: {n}}}) SET v.last_run_at = {now}",
-        n = escape_str(&name),
-        now = escape_str(&now),
-    ));
-
-    let mut out = String::new();
-    out.push_str(&format!("# View `{name}`\n\n"));
-    out.push_str("```cypher\n");
-    out.push_str(&cypher);
-    if !cypher.ends_with('\n') {
-        out.push('\n');
-    }
-    out.push_str("```\n\n");
-    match db.query(&cypher) {
-        Ok(t) => out.push_str(&format_table_md(&t)),
-        Err(e) => out.push_str(&format!("_(query failed: {e})_")),
-    }
-    ok_text(out)
-}
-
-fn handle_list_views(db: &Db) -> Value {
-    let q = "MATCH (v:View) RETURN v.name AS name, v.description AS description, \
-             v.created_at AS created_at, v.last_run_at AS last_run_at \
-             ORDER BY v.name";
-    let t = match db.query(q) {
-        Ok(t) => t,
-        Err(e) => return err_text(format!("list_views failed: {e}")),
-    };
-    if t.rows.is_empty() {
-        return ok_text("_(no saved views)_".to_string());
-    }
-    let mut out = String::new();
-    out.push_str(&format!("# Saved views ({})\n\n", t.rows.len()));
-    out.push_str("| name | description | created_at | last_run_at |\n");
-    out.push_str("| --- | --- | --- | --- |\n");
-    let n_i = t.col("name");
-    let d_i = t.col("description");
-    let c_i = t.col("created_at");
-    let l_i = t.col("last_run_at");
-    for row in &t.rows {
-        let n = n_i
-            .and_then(|i| row.get(i))
-            .map(md_cell)
-            .unwrap_or_default();
-        let d = d_i
-            .and_then(|i| row.get(i))
-            .map(md_cell)
-            .unwrap_or_default();
-        let c = c_i
-            .and_then(|i| row.get(i))
-            .map(md_cell)
-            .unwrap_or_default();
-        let l = l_i
-            .and_then(|i| row.get(i))
-            .map(md_cell)
-            .unwrap_or_default();
-        out.push_str(&format!("| `{n}` | {d} | {c} | {l} |\n"));
-    }
-    ok_text(out.trim_end().to_string())
 }
 
 // ── find_symbol ───────────────────────────────────────────────────────────────
@@ -1802,6 +1479,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::views::substitute_view_params;
     use crate::watch::{is_indexable_event_path, new_shared_status, rel_paths_from};
     use codegraph_core::Table;
 
