@@ -1,6 +1,30 @@
 # codegraph build journal
 
-## Round 2 — live-indexing in the MCP server (Option A)
+## Round 3 — quick-win fixes + future-ideas reach-down
+
+Now with persistent LSP + live mode actually wired in this session, so
+the MCP tools are responsive enough to use as a primary navigation
+mechanism. Real experience reports below.
+
+### (b) Sidecar feedback-loop filter
+
+- **Reached for first:** `mcp__codegraph__find_symbol("is_indexable_event_path")`
+  → exact location + signature in one call. With grep I'd have done
+  `grep -rn 'is_indexable_event_path' crates/`. About the same actually,
+  but the result is structured and includes the signature so I knew
+  what I was editing without opening the file.
+- **Concrete signal that motivated this fix:** `mcp__codegraph__index_status`
+  in the previous turn surfaced `codegraph.db.codegraph-meta.json` in
+  the "Last batch paths" — the indexer's own sidecar was triggering the
+  watcher. Without the live status tool, this would have shown up only
+  via stderr spam in the MCP log; nobody reads those.
+- **Tooling win:** the `index_status` tool was *itself* the diagnostic
+  here. Building observability paid off within hours.
+- **Trivial fix:** four extra `ends_with` clauses in the path filter,
+  one test asserting the four extensions are dropped while real source
+  still passes. mcp suite 33/33.
+
+
 
 Resumed after the user wired `mcp__codegraph__*` into Claude Code. Now
 I'm actually using the graph for lookups instead of grepping. Real

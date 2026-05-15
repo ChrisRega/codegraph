@@ -2523,6 +2523,17 @@ fn is_indexable_event_path(p: &std::path::Path) -> bool {
     {
         return false;
     }
+    // Skip the indexer's own outputs to break the obvious feedback loop:
+    // each successful run writes the sidecar, which would re-fire the
+    // watcher, which would run the indexer again. Same for the velr DB
+    // file and its SQLite WAL/SHM siblings.
+    if s.ends_with(".codegraph-meta.json")
+        || s.ends_with(".db")
+        || s.ends_with(".db-wal")
+        || s.ends_with(".db-shm")
+    {
+        return false;
+    }
     matches!(
         p.extension().and_then(|e| e.to_str()),
         Some(
@@ -3131,6 +3142,32 @@ mod tests {
         assert!(md.contains("`abcd1234`"), "{md}");
         assert!(md.contains("src/lib.rs"));
         assert!(md.contains("README.md"));
+    }
+
+    #[test]
+    fn is_indexable_event_path_skips_indexer_outputs() {
+        // Sidecar that the indexer itself writes — would feedback-loop the watcher.
+        assert!(!is_indexable_event_path(std::path::Path::new(
+            "/ws/codegraph.db.codegraph-meta.json"
+        )));
+        // velr db + its SQLite siblings.
+        assert!(!is_indexable_event_path(std::path::Path::new(
+            "/ws/codegraph.db"
+        )));
+        assert!(!is_indexable_event_path(std::path::Path::new(
+            "/ws/codegraph.db-wal"
+        )));
+        assert!(!is_indexable_event_path(std::path::Path::new(
+            "/ws/codegraph.db-shm"
+        )));
+        // Real source still passes.
+        assert!(is_indexable_event_path(std::path::Path::new(
+            "/ws/src/main.rs"
+        )));
+        // Other JSON files still indexable (e.g. OpenAPI spec).
+        assert!(is_indexable_event_path(std::path::Path::new(
+            "/ws/api/openapi.json"
+        )));
     }
 
     #[test]
