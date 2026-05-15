@@ -9,6 +9,8 @@ pub use velr;
 
 use std::collections::BTreeMap;
 
+pub mod time;
+
 pub type VelrError = velr::Error;
 pub type Result<T> = std::result::Result<T, VelrError>;
 

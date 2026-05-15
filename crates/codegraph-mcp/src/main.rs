@@ -2917,35 +2917,8 @@ fn handle_impact(db: &Db, params: &Value) -> Value {
     ok_text(out.trim_end().to_string())
 }
 
-/// RFC 3339 / ISO 8601 timestamp without an external dep.
-fn chrono_now_iso() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let dur = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = dur.as_secs() as i64;
-    let nanos = dur.subsec_nanos();
-    // Days from epoch → civil date (Howard Hinnant).
-    let days = secs.div_euclid(86_400);
-    let secs_of_day = secs.rem_euclid(86_400);
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = (z - era * 146_097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    let y = if m <= 2 { y + 1 } else { y };
-    let h = (secs_of_day / 3600) as u32;
-    let mi = ((secs_of_day % 3600) / 60) as u32;
-    let s = (secs_of_day % 60) as u32;
-    format!(
-        "{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{s:02}.{:06}Z",
-        nanos / 1000
-    )
-}
+// Now sourced from `codegraph_core::time::now_iso` — see refactoring 1b.
+use codegraph_core::time::now_iso as chrono_now_iso;
 
 // ── DB freshness check ────────────────────────────────────────────────────────
 
