@@ -196,6 +196,21 @@ fn tool_list() -> Value {
                         "limit": { "type": "integer", "description": "Max commits (default 50)." }
                     }
                 }
+            },
+            {
+                "name": "impact",
+                "description": "Compute the transitive blast radius of a node. Walks `CALLS` outwards (callees) and inwards (callers) up to `depth`, and one-hop for `MENTIONS` (docs) and `IMPLEMENTED_BY` (scenarios). Returns a Markdown report with counts per category and the top-N affected nodes. Use this before refactoring or deleting a function to see who is affected.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "label": { "type": "string", "description": "Node label, defaults to 'Function'." },
+                        "key":   { "type": "string", "description": "Identifying property, defaults to 'qualified_name'." },
+                        "value": { "type": "string", "description": "Value of the identifying property." },
+                        "depth": { "type": "integer", "description": "Max BFS depth for CALLS (default 3, capped at 6)." },
+                        "top":   { "type": "integer", "description": "Max nodes shown per category (default 15)." }
+                    },
+                    "required": ["value"]
+                }
             }
         ]
     })
@@ -501,13 +516,6 @@ fn handle_node_md(db: &Db, params: &Value) -> Value {
 
     // Reject anything that doesn't look like a bare identifier — defensive,
     // since label/key are inlined directly into Cypher.
-    let safe_ident = |s: &str| {
-        !s.is_empty()
-            && s.chars()
-                .next()
-                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-            && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-    };
     if !safe_ident(&label) {
         return err_text(format!("invalid label: {label}"));
     }
@@ -859,6 +867,269 @@ fn handle_history(db: &Db, params: &Value) -> Value {
     ok_text(out.trim_end().to_string())
 }
 
+// ── impact (blast radius) ─────────────────────────────────────────────────────
+
+fn safe_ident(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// One BFS hop along `rel`, expanding from a frontier of nodes identified by
+/// `(label, key, value ∈ frontier)`. Returns the next frontier as
+/// `(qualified_name, path)` pairs not already in `visited`.
+fn bfs_hop(
+    db: &Db,
+    label: &str,
+    key: &str,
+    rel: &str,
+    outgoing: bool,
+    frontier: &[String],
+    visited: &mut BTreeSet<String>,
+) -> Vec<(String, String)> {
+    if frontier.is_empty() {
+        return Vec::new();
+    }
+    let in_list = frontier
+        .iter()
+        .map(|s| escape_str(s))
+        .collect::<Vec<_>>()
+        .join(",");
+    let pattern = if outgoing {
+        format!("(n:{label})-[:{rel}]->(m:{label})")
+    } else {
+        format!("(n:{label})<-[:{rel}]-(m:{label})")
+    };
+    let q = format!(
+        "MATCH {pattern} \
+         WHERE n.{key} IN [{in_list}] \
+         RETURN DISTINCT m.{key} AS qn, m.path AS path"
+    );
+    let t = match db.query(&q) {
+        Ok(t) => t,
+        Err(_) => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for row in &t.rows {
+        let qn = row
+            .first()
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .to_string();
+        if qn.is_empty() {
+            continue;
+        }
+        if visited.insert(qn.clone()) {
+            let path = row
+                .get(1)
+                .and_then(|c| c.as_str())
+                .unwrap_or("")
+                .to_string();
+            out.push((qn, path));
+        }
+    }
+    out
+}
+
+/// BFS along `rel` from the seed up to `max_depth`, returning
+/// `(qualified_name, path, depth)` for every newly discovered node.
+fn bfs_collect(
+    db: &Db,
+    label: &str,
+    key: &str,
+    seed: &str,
+    rel: &str,
+    outgoing: bool,
+    max_depth: i64,
+) -> Vec<(String, String, i64)> {
+    let mut visited: BTreeSet<String> = BTreeSet::new();
+    visited.insert(seed.to_string());
+    let mut frontier = vec![seed.to_string()];
+    let mut found = Vec::new();
+    for d in 1..=max_depth {
+        if frontier.is_empty() {
+            break;
+        }
+        let next = bfs_hop(db, label, key, rel, outgoing, &frontier, &mut visited);
+        let next_keys: Vec<String> = next.iter().map(|(qn, _)| qn.clone()).collect();
+        for (qn, path) in next {
+            found.push((qn, path, d));
+        }
+        frontier = next_keys;
+    }
+    found
+}
+
+fn render_impact_section(title: &str, items: &[(String, String, i64)], top: i64) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("## {} ({})\n\n", title, items.len()));
+    if items.is_empty() {
+        out.push_str("_(none)_\n\n");
+        return out;
+    }
+    let total = items.len();
+    let shown = (top as usize).min(total);
+    for (qn, path, depth) in items.iter().take(shown) {
+        let path_part = if path.is_empty() {
+            String::new()
+        } else {
+            format!(" — `{path}`")
+        };
+        out.push_str(&format!("- depth {depth}: `{qn}`{path_part}\n"));
+    }
+    if shown < total {
+        out.push_str(&format!("- _… {} more_\n", total - shown));
+    }
+    out.push('\n');
+    out
+}
+
+fn handle_impact(db: &Db, params: &Value) -> Value {
+    let label = params
+        .get("label")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Function")
+        .to_string();
+    let key = params
+        .get("key")
+        .and_then(|v| v.as_str())
+        .unwrap_or("qualified_name")
+        .to_string();
+    let value = match params.get("value").and_then(|v| v.as_str()) {
+        Some(s) => s.to_string(),
+        None => return err_text("missing required argument: value".to_string()),
+    };
+    let depth = params
+        .get("depth")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(3)
+        .clamp(1, 6);
+    let top = params
+        .get("top")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(15)
+        .max(1);
+
+    if !safe_ident(&label) {
+        return err_text(format!("invalid label: {label}"));
+    }
+    if !safe_ident(&key) {
+        return err_text(format!("invalid key: {key}"));
+    }
+
+    let val_lit = escape_str(&value);
+
+    // Verify the seed exists (and grab its file).
+    let seed_q = format!(
+        "MATCH (n:{label} {{{key}: {val_lit}}}) \
+         OPTIONAL MATCH (n)-[:DEFINED_IN]->(f:File) \
+         RETURN f.path AS path LIMIT 1"
+    );
+    let (exists, def_file) = match db.query(&seed_q) {
+        Ok(t) if !t.rows.is_empty() => (
+            true,
+            t.rows[0]
+                .first()
+                .and_then(|c| c.as_str())
+                .unwrap_or("")
+                .to_string(),
+        ),
+        Ok(_) => (false, String::new()),
+        Err(e) => return err_text(format!("seed lookup failed: {e}")),
+    };
+    if !exists {
+        return ok_text(format!(
+            "# Not found\n\nNo `:{label}` with `{key} = {value:?}`.\n"
+        ));
+    }
+
+    let callees = bfs_collect(db, &label, &key, &value, "CALLS", true, depth);
+    let callers = bfs_collect(db, &label, &key, &value, "CALLS", false, depth);
+
+    // One-hop: doc sections that mention this node.
+    let mentions_q = format!(
+        "MATCH (n:{label} {{{key}: {val_lit}}})<-[:MENTIONS]-(s:DocSection) \
+         RETURN s.qualified_name AS qn, s.path AS path"
+    );
+    let mut mentions: Vec<(String, String, i64)> = Vec::new();
+    if let Ok(t) = db.query(&mentions_q) {
+        for row in &t.rows {
+            let qn = row
+                .first()
+                .and_then(|c| c.as_str())
+                .unwrap_or("")
+                .to_string();
+            let path = row
+                .get(1)
+                .and_then(|c| c.as_str())
+                .unwrap_or("")
+                .to_string();
+            if !qn.is_empty() {
+                mentions.push((qn, path, 1));
+            }
+        }
+    }
+
+    // One-hop: BDD steps implemented by this function.
+    let steps_q = format!(
+        "MATCH (n:{label} {{{key}: {val_lit}}})<-[:IMPLEMENTED_BY]-(st:Step) \
+         RETURN st.qualified_name AS qn, st.text AS text"
+    );
+    let mut steps: Vec<(String, String, i64)> = Vec::new();
+    if let Ok(t) = db.query(&steps_q) {
+        for row in &t.rows {
+            let qn = row
+                .first()
+                .and_then(|c| c.as_str())
+                .unwrap_or("")
+                .to_string();
+            let text = row
+                .get(1)
+                .and_then(|c| c.as_str())
+                .unwrap_or("")
+                .to_string();
+            if !qn.is_empty() {
+                steps.push((qn, text, 1));
+            }
+        }
+    }
+
+    let total_radius = callees.len() + callers.len() + mentions.len() + steps.len();
+    let mut out = String::new();
+    out.push_str(&format!("# Impact: `:{label} {{{key}: {value:?}}}`\n\n"));
+    if !def_file.is_empty() {
+        out.push_str(&format!("Defined in `{def_file}`. "));
+    }
+    out.push_str(&format!(
+        "**Blast radius: {total_radius}** \
+         (callers {}, callees {}, doc mentions {}, scenario steps {}).\n\n",
+        callers.len(),
+        callees.len(),
+        mentions.len(),
+        steps.len()
+    ));
+    out.push_str(&render_impact_section(
+        &format!("Callers (transitive, depth ≤ {depth})"),
+        &callers,
+        top,
+    ));
+    out.push_str(&render_impact_section(
+        &format!("Callees (transitive, depth ≤ {depth})"),
+        &callees,
+        top,
+    ));
+    out.push_str(&render_impact_section("Doc mentions", &mentions, top));
+    out.push_str(&render_impact_section(
+        "Scenario steps implemented",
+        &steps,
+        top,
+    ));
+
+    ok_text(out.trim_end().to_string())
+}
+
 /// RFC 3339 / ISO 8601 timestamp without an external dep.
 fn chrono_now_iso() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1042,6 +1313,7 @@ fn main() {
                     "write_note" => handle_write_note(&db, params),
                     "list_notes" => handle_list_notes(&db, params),
                     "history" => handle_history(&db, params),
+                    "impact" => handle_impact(&db, params),
                     other => err_text(format!("unknown tool: {other}")),
                 };
                 response(&req.id, content)
@@ -1081,6 +1353,7 @@ mod tests {
             "write_note",
             "list_notes",
             "history",
+            "impact",
         ] {
             assert!(names.contains(&expected), "missing tool: {expected}");
         }
@@ -1237,6 +1510,44 @@ mod tests {
         assert!(md.contains("# Indexed commits"));
         assert!(md.contains("aaa111"));
         assert!(md.contains("bbb222"));
+    }
+
+    #[test]
+    fn impact_reports_callers_and_callees() {
+        let db = Db::open_in_memory().unwrap();
+        // Chain a -> b -> c -> d, plus e -> b (so b has two callers transitively from a's POV).
+        for name in ["a", "b", "c", "d", "e"] {
+            db.run(&format!(
+                "CREATE (:Function {{qualified_name: 'x::{name}', name: '{name}', path: 'src/x.rs'}})"
+            ))
+            .unwrap();
+        }
+        for (caller, callee) in [("a", "b"), ("b", "c"), ("c", "d"), ("e", "b")] {
+            db.run(&format!(
+                "MATCH (u:Function {{qualified_name: 'x::{caller}'}}), \
+                       (v:Function {{qualified_name: 'x::{callee}'}}) \
+                 CREATE (u)-[:CALLS]->(v)"
+            ))
+            .unwrap();
+        }
+        let v = handle_impact(&db, &json!({ "value": "x::b", "depth": 3, "top": 10 }));
+        let md = text_of(&v);
+        assert!(md.contains("# Impact:"), "got {md}");
+        assert!(md.contains("Blast radius:"));
+        // b's callees transitively: c, d
+        assert!(md.contains("x::c"));
+        assert!(md.contains("x::d"));
+        // b's callers: a, e
+        assert!(md.contains("x::a"));
+        assert!(md.contains("x::e"));
+    }
+
+    #[test]
+    fn impact_handles_unknown_seed() {
+        let db = seed_db();
+        let v = handle_impact(&db, &json!({ "value": "does::not::exist" }));
+        let md = text_of(&v);
+        assert!(md.contains("# Not found"));
     }
 
     #[test]

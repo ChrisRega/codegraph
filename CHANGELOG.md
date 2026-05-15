@@ -8,6 +8,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`impact` MCP tool** — transitive blast-radius report for a node.
+  BFS over `[:CALLS]` (in + out) up to a bounded depth, plus one-hop for
+  `[:MENTIONS]` and `[:IMPLEMENTED_BY]`. Returns a Markdown report with
+  per-category counts and the top-N affected nodes.
 - **Markdown-shaped MCP tools** for LLM-friendly output:
   - `cypher_md` — same as `cypher` but renders rows as a GitHub-flavoured
     Markdown table.

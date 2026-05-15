@@ -110,6 +110,7 @@ into an LLM reply, plus a `:Note` mechanism for persisting findings:
 | `write_note` | attach a Markdown `:Note` to any node |
 | `list_notes` | list notes (optionally filtered to a subgraph) |
 | `history` | walk `:GitCommit` snapshots stored in the graph |
+| `impact` | transitive blast radius of a node (callers, callees, mentions, scenarios) |
 | `begin` / `write` / `commit` / `rollback` | buffered transactions |
 | `explain` | velr planner trace |
 

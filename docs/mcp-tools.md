@@ -131,6 +131,26 @@ to their `:Author` via the `[:AUTHORED]` edge.
 | --- | --- | --- |
 | `limit` | integer, optional | default `50` |
 
+## `impact`
+
+Computes the transitive blast radius of a node. Walks `[:CALLS]` outwards
+(callees) and inwards (callers) up to `depth` hops via app-level BFS, and
+one-hop for `[:MENTIONS]` (`:DocSection`s) and `[:IMPLEMENTED_BY]`
+(`:Step`s). Returns a Markdown report with counts per category and the
+top-N affected nodes by discovery order (depth-ascending).
+
+| arg | type | notes |
+| --- | --- | --- |
+| `value` | string, required | identifying property value, e.g. `'codegraph_indexer::main::run'` |
+| `label` | string, optional | default `Function` |
+| `key`   | string, optional | default `qualified_name` |
+| `depth` | integer, optional | BFS depth for CALLS, default `3`, capped at `6` |
+| `top`   | integer, optional | max nodes shown per category, default `15` |
+
+`label` and `key` are validated against `^[A-Za-z_][A-Za-z0-9_]*$` since
+they are inlined into the Cypher template. `value` is escaped via
+`escape_str`. Returns "Not found" if the seed doesn't exist.
+
 ## Auto-reopen behaviour
 
 Before every dispatch, `codegraph-mcp` `stat`s the database file. If its

@@ -104,7 +104,7 @@ These build directly on the G-series Markdown / Notes / revision
 foundation. Goal: make `codegraph` the *first* thing the agent reaches
 for, with the lowest-token answer for each question shape.
 
-- [ ] **H1** — `impact` MCP tool. Transitive blast radius of a node
+- [x] **H1** — `impact` MCP tool. Transitive blast radius of a node
   via `CALLS*`, `IMPLEMENTED_BY`, `MENTIONS`, `DEFINED_IN`. Returns a
   Markdown report with counts per category and the top-N affected
   nodes. Replaces the "who uses this" crawl before refactors.
