@@ -4,6 +4,7 @@ Cargo.lock.bak
 *.db
 *.db-shm
 *.db-wal
+*.codegraph-meta.json
 .idea/
 .vscode/
 .DS_Store
