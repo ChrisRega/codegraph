@@ -188,6 +188,60 @@ Each entry: feature, what I reached for, what I wished existed.
   test that asserts on a static value without calling anything won't
   produce edges. Doc says so. A future pass could attribute test
   effects via macro expansion, but that's a different project.
+## H9 — `watch` / `unwatch` / `list_watches` + indexer Phase 7
+
+- **Reached for:** `grep -n 'Phase 6'` to find the right insertion
+  point in the indexer. Otherwise zero exploration — the patterns
+  from H6 (Cypher post-processing) and G2 (note creation) compose
+  cleanly here.
+- **Design choice:** the trigger lives in the *indexer*, not the MCP
+  server. Reasoning: the MCP server is read/write-on-demand, the
+  indexer is the only thing that runs on a schedule (or on user
+  action). Putting trigger evaluation in the indexer means the agent
+  can call `watch` and forget — the next time anyone reindexes, the
+  notes appear.
+- **Honest limit:** the trigger fires on `body` change only. An edit
+  to a comment outside the LSP symbol range, or a refactor that
+  renames the function (changing `qualified_name`), won't fire.
+  Documented in `docs/mcp-tools.md` so the agent doesn't over-trust
+  silence.
+- **velr OR-quirk avoided by design:** the Phase 7 query is a single
+  `WHERE a IS NOT NULL AND b IS NOT NULL AND a <> b` — no OR. Got
+  lucky here, but I've internalised the pattern: any time I'm tempted
+  to write `WHERE x OR y`, split it.
+- **Wish #9 / final wish:** the indexer should expose its phases as
+  library functions so the MCP server could trigger Phase 7 on demand
+  ("re-evaluate watches now"). Currently the only way to fire
+  triggers is to run the full indexer. Punted to `future-ideas.md`.
+- **Tests:** `watch_unwatch_lifecycle` + `watch_rejects_unknown_node`
+  on the MCP side; `fire_watch_triggers_creates_note_and_rebaselines`
+  on the indexer side (asserts: change ⇒ exactly one note, baseline
+  updated, second run produces no second note). Workspace 56/56.
+
+## Closing thoughts (H1–H9 done)
+
+- **Recurring friction:**
+  1. velr's `OR → UNION` rewrite (clobbers `LIMIT`, fans `SET` over
+     all rows). Bit me in H4, H6, H8. The defensive pattern is now
+     reflexive: never write `WHERE a OR b` in a write query; split.
+  2. `cargo fmt` invalidating queued `Edit`s. Cost me a full re-apply
+     in H8 (5 lost edits). Mitigation: don't bundle fmt with the
+     check command at a feature boundary.
+- **What worked:** strict per-feature commit cadence + journal write
+  + checklist update. Each commit is a self-contained, reviewable
+  unit, and the journal preserved the reasoning that the diff alone
+  doesn't show. The codebase ended up with 9 new MCP tools, 1 new
+  indexer phase, 18 new tests, and ~2.5k lines of new code, all on
+  green CI gates.
+- **The dogfooding gap (the user's original ask):** I never used
+  `mcp__codegraph__*` because they aren't wired into this Claude
+  Code session. Every code lookup was `grep` / `Read`. The journal
+  records each one and what the graph would have given me — that's
+  the actionable signal: every "reached for grep, would have used
+  X" entry is a missing capability or a missing wiring step. A
+  future session running with the MCP server attached would
+  consistently shave the lookup roundtrips logged here.
+
 ## H8 — Auto-notes from PR comments
 
 - **Reached for:** zero greps. The `:Note` write pattern from G2 is

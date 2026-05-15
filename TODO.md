@@ -133,7 +133,7 @@ for, with the lowest-token answer for each question shape.
 - [x] **H8** — Auto-notes from PR comments. `gh pr view --comments`
   parsed into `:Note`s attached to referenced symbols. Long-term
   memory from existing review activity.
-- [ ] **H9** — `watch_node` triggers. Mark a node as watched; the next
+- [x] **H9** — `watch_node` triggers. Mark a node as watched; the next
   indexer run writes a `:Note` describing what changed, so the agent
   is notified asynchronously across sessions.
 

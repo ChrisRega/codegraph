@@ -139,6 +139,32 @@ to their `:Author` via the `[:AUTHORED]` edge.
 | --- | --- | --- |
 | `limit` | integer, optional | default `50` |
 
+## `watch`, `unwatch`, `list_watches`
+
+Cross-session change notifications. `watch(label, key, value)` adds the
+`:Watch` label to a node and snapshots the current `body` as
+`watch_baseline_body`, plus the current HEAD hash as
+`watch_set_at_commit`. The next indexer run compares each
+`:Watch`'s current `body` against the baseline; on mismatch, it
+attaches a `:Note` (tagged `watch-trigger`, authored
+`codegraph-indexer`) to the node and re-baselines, so a single change
+produces exactly one trigger note.
+
+`unwatch` removes the `:Watch` label and the three watch_* properties.
+`list_watches` returns a Markdown table of all watched nodes.
+
+| tool | arg | type | notes |
+| --- | --- | --- | --- |
+| `watch` | `label`, `key`, `value` | string, required | identifies the node |
+| `unwatch` | `label`, `key`, `value` | string, required | |
+| `list_watches` | (none) | | |
+
+The trigger fires on `body` change only. Anything that doesn't show up
+in the LSP body slice (e.g. an attribute moved outside the symbol
+range, a doc comment edit beyond the slice) won't fire. This is a
+known limit; covering it would require diffing more state at watch
+time.
+
 ## `import_pr_notes`
 
 Bulk-imports a list of PR / code-review comments as `:Note` nodes

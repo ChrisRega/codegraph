@@ -516,6 +516,15 @@ fn main() {
         );
     }
 
+    // ── Phase 7: fire watch triggers ─────────────────────────────────────────
+    //
+    // For every `:Watch` node whose current `body` differs from the baseline
+    // captured at watch time, write a `:Note` (tagged `watch-trigger`) under
+    // the node and then re-baseline. This is the asynchronous, cross-session
+    // notification mechanism: the next time someone calls `node_md` on a
+    // watched function, the dossier surfaces the change automatically.
+    fire_watch_triggers(&db, &head_hash);
+
     // ── Persist sidecar metadata ─────────────────────────────────────────────
     if !head_hash.is_empty() {
         if let Err(e) = meta::save(
@@ -1470,6 +1479,96 @@ fn emit_python_dep(db: &Db, pkg_name: &str, dep_name: &str, kind: &str) {
     );
 }
 
+/// Walk every `:Watch` node, compare current `body` against
+/// `watch_baseline_body`, and on mismatch attach a `:Note` describing the
+/// change before re-baselining. Best-effort: a per-node failure is logged
+/// to stderr but does not abort indexing.
+fn fire_watch_triggers(db: &Db, head_hash: &str) {
+    let q = "MATCH (w:Watch) \
+             WHERE w.watch_baseline_body IS NOT NULL AND w.body IS NOT NULL \
+                   AND w.body <> w.watch_baseline_body \
+             RETURN w.qualified_name AS qn, w.path AS path, w.name AS name, \
+                    w.watch_set_at_commit AS prev_commit \
+             LIMIT 500";
+    let t = match db.query(q) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("  [!] watch trigger query failed: {e}");
+            return;
+        }
+    };
+    if t.rows.is_empty() {
+        return;
+    }
+    let now = chrono_now_iso();
+    let head_short = if head_hash.len() > 8 {
+        &head_hash[..8]
+    } else {
+        head_hash
+    };
+    let mut fired = 0;
+    for row in &t.rows {
+        let qn = row.first().and_then(|c| c.as_str()).unwrap_or("");
+        let path = row.get(1).and_then(|c| c.as_str()).unwrap_or("");
+        let name = row.get(2).and_then(|c| c.as_str()).unwrap_or("");
+        let prev = row.get(3).and_then(|c| c.as_str()).unwrap_or("");
+        let prev_short = if prev.len() > 8 { &prev[..8] } else { prev };
+
+        let identifier = if !qn.is_empty() { qn } else { name };
+        if identifier.is_empty() {
+            continue;
+        }
+
+        let title = format!("watch trigger: {identifier}");
+        let md = format!(
+            "Body of `{identifier}` changed between `{prev_short}` and `{head_short}`.\n\n\
+             Path: `{path}`.\n\n\
+             _Re-baseline applied automatically; this note records the diff event._"
+        );
+        let note_id = format!(
+            "watch-{}-{}",
+            identifier.replace([':', '/', ' '], "_"),
+            now.replace([':', '.'], "-")
+        );
+        // Create the note + edge keyed off the identifier we have. Try qn first.
+        let select = if !qn.is_empty() {
+            format!(
+                "MATCH (t:Watch {{qualified_name: {q}}})",
+                q = escape_str(qn)
+            )
+        } else if !path.is_empty() {
+            format!("MATCH (t:Watch {{path: {p}}})", p = escape_str(path))
+        } else {
+            format!("MATCH (t:Watch {{name: {n}}})", n = escape_str(name))
+        };
+        let create_q = format!(
+            "{select} \
+             MERGE (n:Note {{id: {id}}}) \
+             SET n.title = {title}, n.author = 'codegraph-indexer', n.tags = 'watch-trigger', \
+                 n.created_at = {now}, n.markdown = {md} \
+             CREATE (n)-[:NOTES]->(t)",
+            id = escape_str(&note_id),
+            title = escape_str(&title),
+            now = escape_str(&now),
+            md = escape_str(&md),
+        );
+        if let Err(e) = db.run(&create_q) {
+            eprintln!("  [!] watch trigger note for {identifier} failed: {e}");
+            continue;
+        }
+        // Re-baseline so the next pass only fires on the next change.
+        let rebase = format!(
+            "{select} SET t.watch_baseline_body = t.body, t.watch_set_at_commit = {head}",
+            head = escape_str(head_hash),
+        );
+        let _ = db.run(&rebase);
+        fired += 1;
+    }
+    if fired > 0 {
+        eprintln!("  [w] Fired {fired} watch trigger note(s)");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1579,5 +1678,50 @@ mod tests {
             .query("MATCH (a)-[:TESTS]->(b) RETURN a.qualified_name AS a, b.qualified_name AS b ORDER BY a")
             .unwrap();
         assert_eq!(t.rows.len(), 2);
+    }
+
+    /// Watch trigger fires when body differs from baseline; subsequent runs
+    /// without further change are no-ops (re-baseline took effect).
+    #[test]
+    fn fire_watch_triggers_creates_note_and_rebaselines() {
+        let db = codegraph_core::Db::open_in_memory().unwrap();
+        // A watched function with mismatched body / baseline.
+        db.run(
+            "CREATE (:Function:Watch {qualified_name: 'm::foo', name: 'foo', \
+             body: 'fn foo() { 2 }', watch_baseline_body: 'fn foo() { 1 }', \
+             watch_set_at_commit: 'aaa11111'})",
+        )
+        .unwrap();
+        // An unrelated unwatched function — must not produce a note.
+        db.run("CREATE (:Function {qualified_name: 'm::bar', name: 'bar', body: 'fn bar() {}'})")
+            .unwrap();
+
+        fire_watch_triggers(&db, "bbb22222");
+
+        // Note attached to foo
+        let t = db
+            .query("MATCH (n:Note)-[:NOTES]->(f:Function {qualified_name: 'm::foo'}) RETURN n.title AS title, n.tags AS tags")
+            .unwrap();
+        assert_eq!(t.rows.len(), 1, "expected exactly one trigger note");
+        assert!(t.rows[0][0]
+            .as_str()
+            .unwrap_or("")
+            .contains("watch trigger"));
+        assert_eq!(t.rows[0][1].as_str().unwrap_or(""), "watch-trigger");
+
+        // Baseline was updated to current body.
+        let t2 = db
+            .query(
+                "MATCH (f:Function {qualified_name: 'm::foo'}) RETURN f.watch_baseline_body AS b",
+            )
+            .unwrap();
+        assert_eq!(t2.rows[0][0].as_str().unwrap_or(""), "fn foo() { 2 }");
+
+        // Second run with no further change ⇒ no new notes.
+        fire_watch_triggers(&db, "ccc33333");
+        let t3 = db
+            .query("MATCH (n:Note)-[:NOTES]->(f:Function {qualified_name: 'm::foo'}) RETURN count(n) AS c")
+            .unwrap();
+        assert_eq!(t3.rows[0][0].as_i64().unwrap(), 1);
     }
 }

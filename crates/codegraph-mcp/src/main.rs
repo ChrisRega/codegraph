@@ -198,6 +198,37 @@ fn tool_list() -> Value {
                 }
             },
             {
+                "name": "watch",
+                "description": "Mark a node as watched. The next indexer run compares the current `body` against the baseline captured here; if anything changed, a `:Note` tagged `watch-trigger` is created and attached to the node. Use this to be notified across sessions when a function you care about gets modified by someone else.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "label": { "type": "string", "description": "Node label." },
+                        "key":   { "type": "string", "description": "Identifying property name." },
+                        "value": { "type": "string", "description": "Property value." }
+                    },
+                    "required": ["label", "key", "value"]
+                }
+            },
+            {
+                "name": "unwatch",
+                "description": "Remove the `:Watch` label and baseline tracking properties from a node.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "label": { "type": "string" },
+                        "key":   { "type": "string" },
+                        "value": { "type": "string" }
+                    },
+                    "required": ["label", "key", "value"]
+                }
+            },
+            {
+                "name": "list_watches",
+                "description": "List every node currently carrying the `:Watch` label, with the commit at which the baseline was captured.",
+                "inputSchema": { "type": "object", "properties": {} }
+            },
+            {
                 "name": "import_pr_notes",
                 "description": "Import a list of PR / code-review comments as `:Note` nodes attached to any `:Function` they reference. Backticked tokens in each `body` are looked up against `Function.name` and `Function.qualified_name`; matching targets all get the same note attached. Suggested workflow: feed the output of `gh pr view <n> --json comments` into the `comments` argument.",
                 "inputSchema": {
@@ -1025,6 +1056,148 @@ fn handle_history(db: &Db, params: &Value) -> Value {
             .map(md_cell)
             .unwrap_or_default();
         out.push_str(&format!("| `{s}` | {ts} | {a} | {m} |\n"));
+    }
+    ok_text(out.trim_end().to_string())
+}
+
+// ── watch / unwatch ───────────────────────────────────────────────────────────
+
+fn parse_node_address(params: &Value) -> Result<(String, String, String), String> {
+    let label = params
+        .get("label")
+        .and_then(|v| v.as_str())
+        .ok_or("missing required argument: label")?
+        .to_string();
+    let key = params
+        .get("key")
+        .and_then(|v| v.as_str())
+        .ok_or("missing required argument: key")?
+        .to_string();
+    let value = params
+        .get("value")
+        .and_then(|v| v.as_str())
+        .ok_or("missing required argument: value")?
+        .to_string();
+    if !safe_ident(&label) {
+        return Err(format!("invalid label: {label}"));
+    }
+    if !safe_ident(&key) {
+        return Err(format!("invalid key: {key}"));
+    }
+    Ok((label, key, value))
+}
+
+fn current_head_hash(db: &Db) -> String {
+    db.query("MATCH (h:GitCommit)-[:SNAPSHOT_OF]->(:Workspace) RETURN h.hash AS hash LIMIT 1")
+        .ok()
+        .and_then(|t| t.rows.into_iter().next())
+        .and_then(|r| r.into_iter().next())
+        .and_then(|c| c.as_str().map(str::to_string))
+        .unwrap_or_default()
+}
+
+fn handle_watch(db: &Db, params: &Value) -> Value {
+    let (label, key, value) = match parse_node_address(params) {
+        Ok(t) => t,
+        Err(e) => return err_text(e),
+    };
+    let val_lit = escape_str(&value);
+    let head = current_head_hash(db);
+    let head_lit = escape_str(&head);
+    let now = chrono_now_iso();
+    let now_lit = escape_str(&now);
+    // velr quirk: the SET inside the same statement that filters on
+    // a coalesced default could be tricky. Keep the contract simple:
+    // baseline = current body (may be NULL → that's fine, the next
+    // diff just won't fire until body becomes non-NULL).
+    let q = format!(
+        "MATCH (n:{label} {{{key}: {val_lit}}}) \
+         SET n:Watch, n.watch_baseline_body = n.body, \
+             n.watch_set_at_commit = {head_lit}, n.watch_set_at = {now_lit}"
+    );
+    if let Err(e) = db.run(&q) {
+        return err_text(format!("watch failed: {e}"));
+    }
+    let count_q = format!("MATCH (n:{label}:Watch {{{key}: {val_lit}}}) RETURN count(n) AS c");
+    let n = db
+        .query(&count_q)
+        .ok()
+        .and_then(|t| t.rows.into_iter().next())
+        .and_then(|r| r.into_iter().next())
+        .and_then(|c| c.as_i64())
+        .unwrap_or(0);
+    if n == 0 {
+        return err_text(format!(
+            "no `:{label}` matched `{key} = {value:?}` — nothing watched"
+        ));
+    }
+    ok_text(format!(
+        "watching `:{label} {{{key}: {value:?}}}` at commit `{}`",
+        if head.is_empty() {
+            "(no HEAD)".to_string()
+        } else {
+            head[..head.len().min(8)].to_string()
+        }
+    ))
+}
+
+fn handle_unwatch(db: &Db, params: &Value) -> Value {
+    let (label, key, value) = match parse_node_address(params) {
+        Ok(t) => t,
+        Err(e) => return err_text(e),
+    };
+    let val_lit = escape_str(&value);
+    let q = format!(
+        "MATCH (n:{label}:Watch {{{key}: {val_lit}}}) \
+         REMOVE n:Watch \
+         REMOVE n.watch_baseline_body, n.watch_set_at_commit, n.watch_set_at"
+    );
+    if let Err(e) = db.run(&q) {
+        return err_text(format!("unwatch failed: {e}"));
+    }
+    ok_text(format!("unwatched `:{label} {{{key}: {value:?}}}`"))
+}
+
+fn handle_list_watches(db: &Db) -> Value {
+    let q = "MATCH (w:Watch) \
+             RETURN labels(w) AS lbls, w.qualified_name AS qn, w.path AS path, \
+                    w.name AS name, w.watch_set_at_commit AS commit, \
+                    w.watch_set_at AS at \
+             ORDER BY at DESC LIMIT 200";
+    let t = match db.query(q) {
+        Ok(t) => t,
+        Err(e) => return err_text(format!("list_watches failed: {e}")),
+    };
+    if t.rows.is_empty() {
+        return ok_text("_(nothing is watched)_".to_string());
+    }
+    let mut out = String::new();
+    out.push_str(&format!("# Watches ({})\n\n", t.rows.len()));
+    out.push_str("| labels | identifier | watched at commit | watched at |\n");
+    out.push_str("| --- | --- | --- | --- |\n");
+    for row in &t.rows {
+        let lbls = row.first().and_then(|c| c.as_str()).unwrap_or("[]");
+        let id = row
+            .get(1)
+            .and_then(|c| c.as_str())
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                row.get(2)
+                    .and_then(|c| c.as_str())
+                    .filter(|s| !s.is_empty())
+            })
+            .or_else(|| row.get(3).and_then(|c| c.as_str()))
+            .unwrap_or("?");
+        let commit = row.get(4).and_then(|c| c.as_str()).unwrap_or("");
+        let commit_short = if commit.len() > 8 {
+            &commit[..8]
+        } else {
+            commit
+        };
+        let at = row.get(5).and_then(|c| c.as_str()).unwrap_or("");
+        out.push_str(&format!(
+            "| `{lbls}` | `{id}` | `{commit_short}` | {at} |\n"
+        ));
     }
     ok_text(out.trim_end().to_string())
 }
@@ -2438,6 +2611,9 @@ fn main() {
                     "concept" => handle_concept(&db, params),
                     "list_concepts" => handle_list_concepts(&db),
                     "import_pr_notes" => handle_import_pr_notes(&db, params),
+                    "watch" => handle_watch(&db, params),
+                    "unwatch" => handle_unwatch(&db, params),
+                    "list_watches" => handle_list_watches(&db),
                     other => err_text(format!("unknown tool: {other}")),
                 };
                 response(&req.id, content)
@@ -2487,6 +2663,9 @@ mod tests {
             "concept",
             "list_concepts",
             "import_pr_notes",
+            "watch",
+            "unwatch",
+            "list_watches",
         ] {
             assert!(names.contains(&expected), "missing tool: {expected}");
         }
@@ -2714,6 +2893,38 @@ mod tests {
         // b's callers: a, e
         assert!(md.contains("x::a"));
         assert!(md.contains("x::e"));
+    }
+
+    #[test]
+    fn watch_unwatch_lifecycle() {
+        let db = seed_db();
+        let r = handle_watch(
+            &db,
+            &json!({ "label": "Function", "key": "qualified_name", "value": "a::foo" }),
+        );
+        let txt = text_of(&r);
+        assert!(txt.contains("watching"), "got {txt}");
+
+        let lw = text_of(&handle_list_watches(&db));
+        assert!(lw.contains("a::foo"), "got {lw}");
+
+        let r = handle_unwatch(
+            &db,
+            &json!({ "label": "Function", "key": "qualified_name", "value": "a::foo" }),
+        );
+        assert!(text_of(&r).contains("unwatched"));
+        let lw2 = text_of(&handle_list_watches(&db));
+        assert!(lw2.contains("nothing is watched"), "got {lw2}");
+    }
+
+    #[test]
+    fn watch_rejects_unknown_node() {
+        let db = seed_db();
+        let r = handle_watch(
+            &db,
+            &json!({ "label": "Function", "key": "qualified_name", "value": "no::such" }),
+        );
+        assert!(r.get("isError").and_then(|v| v.as_bool()).unwrap_or(false));
     }
 
     #[test]

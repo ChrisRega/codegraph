@@ -122,6 +122,14 @@ Edges:
   edges).
 - `(:GitCommit)-[:SNAPSHOT_OF]->(:Workspace)` — only the current `HEAD`.
 
+### `:Watch` (a label *added* to any node)
+
+User-set marker for change tracking. When applied via the `watch` MCP
+tool, the node also gets `watch_baseline_body` (snapshot of `body` at
+watch time), `watch_set_at_commit`, and `watch_set_at` properties. The
+indexer's Phase 7 reads those, fires `:Note`s on diff, and updates
+the baseline. `:Watch` is preserved across `--full` reindex.
+
 ### `:Concept`
 
 User-curated subsystem label. Created via the `define_concept` MCP

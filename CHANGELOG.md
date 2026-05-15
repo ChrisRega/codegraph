@@ -8,6 +8,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`watch` / `unwatch` / `list_watches` MCP tools** + indexer Phase 7.
+  Mark a node as watched: the next indexer run diffs the current
+  `body` against the captured baseline, and on change attaches a
+  `:Note` tagged `watch-trigger` to the node, then re-baselines.
+  Cross-session, asynchronous change notifications without polling.
 - **`import_pr_notes` MCP tool** — bulk-imports PR / code-review
   comments as `:Note` nodes attached to any `:Function` they
   reference. Pulls every backtick-delimited identifier from each
