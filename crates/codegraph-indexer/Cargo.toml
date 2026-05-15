@@ -13,6 +13,10 @@ documentation = "https://docs.rs/codegraph-indexer"
 keywords = ["code-analysis", "lsp", "graph", "indexing", "cypher"]
 categories = ["development-tools", "command-line-utilities"]
 
+[lib]
+name = "codegraph_indexer"
+path = "src/lib.rs"
+
 [[bin]]
 name = "codegraph-indexer"
 path = "src/main.rs"
