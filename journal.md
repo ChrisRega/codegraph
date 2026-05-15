@@ -81,3 +81,30 @@ Each entry: feature, what I reached for, what I wished existed.
 - **Tests:** `find_symbol_ranks_exact_above_substring` (4 fns,
   asserts ordering exact > startsWith > contains) and
   `find_symbol_returns_no_match_message`. mcp suite 16/16.
+
+## H3 — Saved views
+
+- **Reached for:** zero greps. Self-contained: I knew the patterns from
+  H1/H2. The `escape_str` discipline + `safe_*` validators are now
+  muscle memory. This is what reuse looks like.
+- **Friction:** `cargo fmt` ran in the previous step's combined command
+  *after* my staged edits, which invalidated three `Edit` calls (the
+  file mtime had advanced). Had to re-`Read` and re-edit. Lesson: when
+  fmt is bundled at the end of a check, don't queue dependent edits in
+  the same batch as a build that runs fmt.
+- **Design call:** the `$token` substitution is intentionally dumb — a
+  byte-walk that recognises identifier-shaped tokens after `$` and
+  swaps in `escape_str(value)`. Unknown tokens fall through unchanged
+  (no error) so the rendered cypher block shows the user exactly what
+  ran. velr has no real prepared statements, so this is the best we
+  can do without writing a Cypher lexer.
+- **Persistence story:** `:View` survives `--full` because the wipe set
+  is restrictive (only source-derived labels). No indexer change
+  needed — the existing G3 design already accounts for this class of
+  user-state node.
+- **Wish #4:** a `delete_view(name)` tool. Trivial to add but I'm
+  staying disciplined about scope creep within H3.
+- **Tests:** `substitute_view_params_replaces_tokens` (escaping +
+  unknown-token passthrough), `save_view_then_view_runs_with_params`
+  (round-trip + appears in `list_views`), `view_unknown_name_…`,
+  `save_view_rejects_invalid_name`. mcp suite 20/20.

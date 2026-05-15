@@ -131,6 +131,32 @@ to their `:Author` via the `[:AUTHORED]` edge.
 | --- | --- | --- |
 | `limit` | integer, optional | default `50` |
 
+## `save_view`, `view`, `list_views`
+
+Persist reusable Cypher queries as `:View` nodes that survive `--full`
+reindex (the wipe set excludes `:View`).
+
+`save_view` MERGEs a `:View {name}` and stores `cypher`,
+`description`, `created_at`, `updated_at`. Names must match
+`[A-Za-z0-9_-]{1,80}`.
+
+`view` looks up the saved cypher, substitutes `$key` tokens against the
+supplied `params` object (each value is escaped via `escape_str`), runs
+the result, and renders it as a Markdown table. Unknown tokens fall
+through unchanged so they show up in the rendered cypher block. Updates
+`v.last_run_at`.
+
+`list_views` returns every saved view as a Markdown table.
+
+| tool | arg | type | notes |
+| --- | --- | --- | --- |
+| `save_view` | `name` | string, required | identifier-like |
+| `save_view` | `cypher` | string, required | may contain `$tokens` |
+| `save_view` | `description` | string, optional | one-line summary |
+| `view` | `name` | string, required | |
+| `view` | `params` | object, optional | substitution map |
+| `list_views` | (none) | | |
+
 ## `find_symbol`
 
 Fuzzy substring search over `:Function` and `:Symbol` nodes (case-insensitive,

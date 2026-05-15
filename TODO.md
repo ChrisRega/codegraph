@@ -112,7 +112,7 @@ for, with the lowest-token answer for each question shape.
   `:Function` / `:Symbol` qualified names returning a Markdown table of
   `qualified_name`, `file:line`, `signature`. The graph equivalent of
   ⌘-T.
-- [ ] **H3** — Saved views. `save_view(name, cypher)` MERGEs a
+- [x] **H3** — Saved views. `save_view(name, cypher)` MERGEs a
   `:View {name, cypher}` node; `view(name, params)` runs it and
   returns Markdown. Reusable named queries with zero Cypher reasoning
   on the agent side.

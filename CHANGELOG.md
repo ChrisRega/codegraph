@@ -8,6 +8,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Saved views** — `save_view`, `view`, `list_views` MCP tools.
+  Cypher queries are persisted as `:View` nodes (survive `--full`
+  reindex), parameterised with `$tokens` that get substituted at run
+  time via `escape_str`. Lets the agent build up a library of named,
+  reusable queries instead of re-deriving Cypher each call.
 - **`find_symbol` MCP tool** — fuzzy substring search across
   `:Function` and `:Symbol` nodes with relevance ranking (exact >
   startsWith on name > startsWith on qn > contains). Returns a

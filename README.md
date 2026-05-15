@@ -112,6 +112,7 @@ into an LLM reply, plus a `:Note` mechanism for persisting findings:
 | `history` | walk `:GitCommit` snapshots stored in the graph |
 | `impact` | transitive blast radius of a node (callers, callees, mentions, scenarios) |
 | `find_symbol` | fuzzy substring search over functions and symbols, ranked |
+| `save_view` / `view` / `list_views` | persist + replay parameterised Cypher queries as `:View` nodes |
 | `begin` / `write` / `commit` / `rollback` | buffered transactions |
 | `explain` | velr planner trace |
 
