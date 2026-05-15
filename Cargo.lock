@@ -613,13 +613,41 @@ dependencies = [
 
 [[package]]
 name = "velr"
-version = "0.2.9"
+version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e3cbcb9f342339914121426482a42ac42e90dad21d772c0ca70944339c0f521"
+checksum = "7f5d1722108ea6eba2b4e346dfcc616bc06b63191d6ce1573968317239707da5"
 dependencies = [
  "blake3",
  "libloading",
+ "velr-runtime-linux-aarch64",
+ "velr-runtime-linux-x86_64",
+ "velr-runtime-macos-universal",
+ "velr-runtime-windows-x86_64",
 ]
+
+[[package]]
+name = "velr-runtime-linux-aarch64"
+version = "0.2.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ede140dcd95a1cdbbba5cd48c18cbf57aab1a52c2fd89733bd26531030346c19"
+
+[[package]]
+name = "velr-runtime-linux-x86_64"
+version = "0.2.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "635f895dd71748a88ee43cb21d826e546e56b7a2eb7e01ceb3a1c4a4389fb637"
+
+[[package]]
+name = "velr-runtime-macos-universal"
+version = "0.2.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e4add11d2d1ab45f03f3304808a3804ce547cf2721ad6e589d6f35a3578d1bac"
+
+[[package]]
+name = "velr-runtime-windows-x86_64"
+version = "0.2.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1f5408100c91391af8e3148731a3e6bf7c6133fce566c36693ac7102795f6459"
 
 [[package]]
 name = "walkdir"
