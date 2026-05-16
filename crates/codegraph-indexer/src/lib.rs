@@ -94,6 +94,7 @@ enum ProjectKind {
     Rust,
     Node,
     Python,
+    Go,
 }
 
 impl ProjectKind {
@@ -107,6 +108,8 @@ impl ProjectKind {
             || workspace.join("setup.py").exists()
         {
             ProjectKind::Python
+        } else if workspace.join("go.mod").exists() {
+            ProjectKind::Go
         } else {
             ProjectKind::Rust
         }
@@ -117,6 +120,7 @@ impl ProjectKind {
             Self::Rust => "Rust",
             Self::Node => "TypeScript",
             Self::Python => "Python",
+            Self::Go => "Go",
         }
     }
     fn default_lsp(&self) -> &'static str {
@@ -124,6 +128,7 @@ impl ProjectKind {
             Self::Rust => "rust-analyzer",
             Self::Node => "typescript-language-server",
             Self::Python => "pyright-langserver",
+            Self::Go => "gopls",
         }
     }
     fn lsp_args(&self) -> Vec<&'static str> {
@@ -131,6 +136,7 @@ impl ProjectKind {
             Self::Rust => vec![],
             Self::Node => vec!["--stdio"],
             Self::Python => vec!["--stdio"],
+            Self::Go => vec![],
         }
     }
     fn extensions(&self) -> &[&str] {
@@ -138,6 +144,7 @@ impl ProjectKind {
             Self::Rust => &["rs"],
             Self::Node => &["ts", "tsx", "js", "jsx"],
             Self::Python => &["py"],
+            Self::Go => &["go"],
         }
     }
 }
@@ -322,6 +329,12 @@ fn run_indexer_inner(opts: IndexOptions, pool: Option<&mut LspPool>) -> Result<I
         ProjectKind::Python => {
             let members = vec![workspace.to_path_buf()];
             index_python_packages(&db, &workspace, &ws_name);
+            let files = collect_source_files(&members, &workspace, kind);
+            (members, files)
+        }
+        ProjectKind::Go => {
+            let members = vec![workspace.to_path_buf()];
+            index_go_packages(&db, &workspace, &ws_name);
             let files = collect_source_files(&members, &workspace, kind);
             (members, files)
         }
@@ -1579,6 +1592,18 @@ fn collect_source_files(
                 }
                 (dirs, name)
             }
+            ProjectKind::Go => {
+                let name = go_module_name(&member_path.join("go.mod")).unwrap_or_else(|| {
+                    member_path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string()
+                });
+                // Go layout convention: source lives at the module root and in
+                // arbitrary subdirectories. Walk the whole module.
+                (vec![member_path.clone()], name)
+            }
             ProjectKind::Python => {
                 let name = std::fs::read_to_string(member_path.join("pyproject.toml"))
                     .ok()
@@ -1630,6 +1655,7 @@ fn collect_source_files(
             ".pytest_cache",
             "egg-info",
             ".eggs",
+            "vendor",
         ];
 
         for src_dir in &src_dirs {
@@ -1788,6 +1814,116 @@ fn index_node_packages(db: &Db, workspace: &Path, ws_name: &str) {
         }
     }
     eprintln!("  [+] Package: {} (.)", name);
+}
+
+/// Extract the `module` declaration from a `go.mod`.
+///
+/// Format spec: <https://go.dev/ref/mod#go-mod-file-module>. We only care
+/// about the single-line form (`module <path>`) which covers ~all
+/// real-world go.mod files; the parenthesised block form is technically
+/// allowed but virtually never used.
+fn go_module_name(go_mod: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(go_mod).ok()?;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("module ") {
+            let name = rest.trim().trim_matches('"');
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn index_go_packages(db: &Db, workspace: &Path, ws_name: &str) {
+    let go_mod = workspace.join("go.mod");
+    let Some(module) = go_module_name(&go_mod) else {
+        eprintln!("  [!] Cannot read module name from go.mod");
+        return;
+    };
+
+    // The `go` directive (line like `go 1.22`) doubles as a version-ish
+    // marker — Go modules don't carry their own version on disk; tags are
+    // upstream. Surface it as the package version so `Package.version` is
+    // populated.
+    let go_version = std::fs::read_to_string(&go_mod)
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find_map(|l| l.trim().strip_prefix("go ").map(|v| v.trim().to_string()))
+        })
+        .unwrap_or_else(|| "0.0.0".to_string());
+
+    run(
+        db,
+        &format!(
+            "MERGE (p:Package {{name: {n}}}) SET p.version = {v}, p.path = '.', p.language = 'Go', p.is_external = false",
+            n = escape_str(&module),
+            v = escape_str(&go_version),
+        ),
+    );
+    run(
+        db,
+        &format!(
+            "MATCH (w:Workspace {{name: {ws}}}), (p:Package {{name: {n}}}) CREATE (w)-[:CONTAINS]->(p)",
+            ws = escape_str(ws_name),
+            n = escape_str(&module),
+        ),
+    );
+
+    // Parse `require` directives — both single-line and parenthesised
+    // blocks. Each entry: `<module-path> <version>` plus optional
+    // `// indirect` trailing comment. We keep external modules as
+    // `:Package {is_external: true}` and link with `[:DEPENDS_ON]`.
+    if let Ok(content) = std::fs::read_to_string(&go_mod) {
+        let mut in_require = false;
+        for raw in content.lines() {
+            let line = raw.trim();
+            if line.is_empty() || line.starts_with("//") {
+                continue;
+            }
+            if line.starts_with("require (") {
+                in_require = true;
+                continue;
+            }
+            if in_require && line.starts_with(')') {
+                in_require = false;
+                continue;
+            }
+            let entry = if let Some(rest) = line.strip_prefix("require ") {
+                Some(rest.trim_start_matches('(').trim())
+            } else if in_require {
+                Some(line)
+            } else {
+                None
+            };
+            let Some(entry) = entry else { continue };
+            // Drop trailing `// indirect` etc.
+            let head = entry.split("//").next().unwrap_or("").trim();
+            let mut parts = head.split_whitespace();
+            let Some(dep_name) = parts.next() else {
+                continue;
+            };
+            run(
+                db,
+                &format!(
+                    "MERGE (ext:Package {{name: {n}}}) SET ext.is_external = true, ext.language = 'Go'",
+                    n = escape_str(dep_name),
+                ),
+            );
+            run(
+                db,
+                &format!(
+                    "MATCH (a:Package {{name: {an}}}), (b:Package {{name: {bn}}}) CREATE (a)-[:DEPENDS_ON {{kind: 'Normal'}}]->(b)",
+                    an = escape_str(&module),
+                    bn = escape_str(dep_name),
+                ),
+            );
+        }
+    }
+
+    eprintln!("  [+] Package: {} (.)", module);
 }
 
 fn index_python_packages(db: &Db, workspace: &Path, ws_name: &str) {
@@ -2041,6 +2177,43 @@ fn phase_watch_triggers(db: &Db, head_hash: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn go_module_name_parses_simple_module_directive() {
+        let dir = tempfile::tempdir().unwrap();
+        let gm = dir.path().join("go.mod");
+        std::fs::write(
+            &gm,
+            "module example.com/demoapp\n\ngo 1.22\n\nrequire github.com/foo/bar v1.0.0\n",
+        )
+        .unwrap();
+        assert_eq!(go_module_name(&gm), Some("example.com/demoapp".into()));
+    }
+
+    #[test]
+    fn go_module_name_strips_optional_quotes() {
+        let dir = tempfile::tempdir().unwrap();
+        let gm = dir.path().join("go.mod");
+        std::fs::write(&gm, "module \"example.com/quoted\"\ngo 1.22\n").unwrap();
+        assert_eq!(go_module_name(&gm), Some("example.com/quoted".into()));
+    }
+
+    #[test]
+    fn go_module_name_returns_none_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let gm = dir.path().join("go.mod");
+        std::fs::write(&gm, "// just a comment\ngo 1.22\n").unwrap();
+        assert_eq!(go_module_name(&gm), None);
+    }
+
+    #[test]
+    fn project_kind_detects_go_module() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("go.mod"), "module x\ngo 1.22\n").unwrap();
+        assert!(matches!(ProjectKind::detect(dir.path()), ProjectKind::Go));
+        assert_eq!(ProjectKind::Go.default_lsp(), "gopls");
+        assert_eq!(ProjectKind::Go.extensions(), &["go"]);
+    }
 
     #[test]
     fn snapshot_calls_by_qn_collects_body_hash_and_callees() {

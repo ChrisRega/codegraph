@@ -12,6 +12,7 @@ exclude = [
     "examples/demo-rust",
     "examples/demo-python",
     "examples/demo-typescript",
+    "examples/demo-go",
 ]
 
 [workspace.package]
