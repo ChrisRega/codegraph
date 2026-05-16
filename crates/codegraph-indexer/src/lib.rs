@@ -2178,9 +2178,35 @@ fn phase_watch_triggers(db: &Db, head_hash: &str) {
 mod tests {
     use super::*;
 
+    /// Per-test scratch directory under `std::env::temp_dir()`. Cleaned up
+    /// on drop so we don't bring in a dev-dependency just for `tempfile`.
+    struct ScratchDir(std::path::PathBuf);
+    impl ScratchDir {
+        fn new(tag: &str) -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static N: AtomicU64 = AtomicU64::new(0);
+            let p = std::env::temp_dir().join(format!(
+                "codegraph-test-{}-{}-{}",
+                tag,
+                std::process::id(),
+                N.fetch_add(1, Ordering::Relaxed),
+            ));
+            std::fs::create_dir_all(&p).unwrap();
+            Self(p)
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     #[test]
     fn go_module_name_parses_simple_module_directive() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = ScratchDir::new("go-mod-simple");
         let gm = dir.path().join("go.mod");
         std::fs::write(
             &gm,
@@ -2192,7 +2218,7 @@ mod tests {
 
     #[test]
     fn go_module_name_strips_optional_quotes() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = ScratchDir::new("go-mod-quoted");
         let gm = dir.path().join("go.mod");
         std::fs::write(&gm, "module \"example.com/quoted\"\ngo 1.22\n").unwrap();
         assert_eq!(go_module_name(&gm), Some("example.com/quoted".into()));
@@ -2200,7 +2226,7 @@ mod tests {
 
     #[test]
     fn go_module_name_returns_none_when_missing() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = ScratchDir::new("go-mod-none");
         let gm = dir.path().join("go.mod");
         std::fs::write(&gm, "// just a comment\ngo 1.22\n").unwrap();
         assert_eq!(go_module_name(&gm), None);
@@ -2208,7 +2234,7 @@ mod tests {
 
     #[test]
     fn project_kind_detects_go_module() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = ScratchDir::new("go-detect");
         std::fs::write(dir.path().join("go.mod"), "module x\ngo 1.22\n").unwrap();
         assert!(matches!(ProjectKind::detect(dir.path()), ProjectKind::Go));
         assert_eq!(ProjectKind::Go.default_lsp(), "gopls");

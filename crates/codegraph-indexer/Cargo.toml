@@ -41,6 +41,3 @@ regex       = { workspace = true }
 pulldown-cmark = { workspace = true }
 uuid        = { workspace = true }
 anyhow      = { workspace = true }
-
-[dev-dependencies]
-tempfile = "3.27.0"
