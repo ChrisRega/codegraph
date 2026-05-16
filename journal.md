@@ -1,5 +1,62 @@
 # codegraph build journal
 
+## Round 5 — cleanup after runaway, workDoneProgress wait
+
+### Cleanup
+
+User reported the indexer was indexing itself to death after a PC
+restart. Real symptom: `index_status` showed `state: running,
+runs_total: 0` for 30+ seconds with a single CLAUDE.md change in the
+batch.
+
+Diagnosis: `ls -la codegraph.db` showed **17 GB** — leftover bloat
+from the pre-chunking-fix runaway (commit `726221e` had the bug, 
+`f929f42` fixed it). The watcher restarted on the bloated DB. With
+the bloated state every query was expensive even though the chunking
+fix prevented further accumulation.
+
+Action: kill MCP server, `rm -f codegraph.db*`, run a clean
+`--full` indexer from CLI. Result: **DB rebuilt at 1 MB** (16 000×
+smaller), 266 functions, 1956 CALLS, 40 commits. The refactor itself
+didn't break anything; the bug-fix from yesterday holds.
+
+**Honest dogfood note:** my own `kill 5493` for the MCP server
+disconnected the `mcp__codegraph__*` tools for this session. I'm
+working with grep+Read until the user next restarts Claude Code.
+Cost: every "look up X" reverts to a grep, which after the K-series
+felt jarring. The MCP tools really are the better navigation layer
+when they're available.
+
+### workDoneProgress wait
+
+The cold-start tax was 15 seconds of blind `thread::sleep` plus
+rust-analyzer's own warm-up. Replaced with `LspClient::wait_until_idle(
+silence_ms, max_ms)`:
+
+- Drain notifications from the LSP channel, replying to server-
+  initiated requests so rust-analyzer doesn't stall.
+- When `silence_ms` passes without any message, declare the LSP
+  settled and return.
+- Cap at `max_ms` so a chatty server can't stall the indexer forever.
+
+Cold start: 1500 ms silence window, 30 s cap.
+Warm: 400 ms silence window, 3 s cap.
+
+**Benchmark (release, fresh DB):**
+
+| Stage | Pre-fix | Post-fix |
+|---|---|---|
+| Full reindex of this workspace | ~3 min | **8.4 s** |
+| Of which: LSP idle wait | 15 s blind | ~3 s adaptive |
+
+~20× speedup on the cold path. The `[lsp] wait_until_idle: settled
+after 33 messages` log line confirms RA actually went quiet 1.5 s
+after the last progress notification — the 15 s fixed sleep was
+wildly conservative.
+
+Tests stay green; no test touches LSP timing so nothing regressed.
+This is purely a perf fix.
+
 ## Round 4 — refactor pass + first real production bug
 
 The K-series refactor (1b/1c/1a/2a) shipped clean — no behavior

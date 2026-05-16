@@ -63,16 +63,23 @@ pub fn index_files_via_lsp(
         let _ = open_or_change(lsp, opened, abs_path);
     }
 
-    let warmup_secs = if initial_warmup { 15 } else { 1 };
+    // Wait for the LSP to actually finish indexing the open files. Replaces
+    // the previous blind `thread::sleep` — most workspaces settle well
+    // below the cap, and a warm pool typically returns in ~1s.
+    let (silence_ms, max_ms) = if initial_warmup {
+        (1500, 30_000)
+    } else {
+        (400, 3_000)
+    };
     eprintln!(
-        "  [*] Waiting {warmup_secs}s for language server to {}...",
+        "  [*] Waiting for language server to {} (silence_ms={silence_ms}, max_ms={max_ms})...",
         if initial_warmup {
             "index workspace"
         } else {
             "settle"
         }
     );
-    std::thread::sleep(std::time::Duration::from_secs(warmup_secs));
+    lsp.wait_until_idle(silence_ms, max_ms);
 
     for (abs_path, rel_path, pkg_name) in files {
         let file_content = std::fs::read_to_string(abs_path).unwrap_or_default();

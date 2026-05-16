@@ -255,6 +255,60 @@ impl LspClient {
         }
     }
 
+    /// Wait for the LSP to go quiet — i.e. `silence_ms` of no incoming
+    /// messages. Used after a bulk `didOpen` to give rust-analyzer time
+    /// to actually finish indexing before we hit `documentSymbol` /
+    /// `outgoingCalls`. Bounded by `max_ms` so a chatty server can't
+    /// stall the indexer forever.
+    ///
+    /// Replaces the previous fixed `thread::sleep`. With a warm server
+    /// this typically returns in ~1s; cold starts settle in 5–10s
+    /// instead of the old fixed 15s.
+    pub fn wait_until_idle(&mut self, silence_ms: u64, max_ms: u64) {
+        use std::sync::mpsc::RecvTimeoutError;
+        use std::time::{Duration, Instant};
+        let silence = Duration::from_millis(silence_ms);
+        let deadline = Instant::now() + Duration::from_millis(max_ms);
+        let mut drained = 0u32;
+        loop {
+            if Instant::now() >= deadline {
+                eprintln!(
+                    "  [lsp] wait_until_idle: hit max_ms={max_ms} after {drained} messages"
+                );
+                return;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now()).min(silence);
+            match self.receiver.recv_timeout(remaining) {
+                Ok(msg) => {
+                    drained = drained.saturating_add(1);
+                    // Stash response payloads — read_response will need them.
+                    if msg.get("id").is_some() && msg.get("method").is_none() {
+                        if let Some(id) = msg.get("id").and_then(|v| v.as_i64()) {
+                            self.pending.insert(id, msg);
+                        }
+                    } else if msg.get("id").is_some() {
+                        // Server-initiated request (e.g. window/workDoneProgress/create) —
+                        // must reply or rust-analyzer stalls.
+                        let reply = json!({
+                            "jsonrpc": "2.0",
+                            "id": msg["id"],
+                            "result": null
+                        });
+                        let _ = self.send_message(&reply);
+                    }
+                    // Other notifications drop on the floor.
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    eprintln!(
+                        "  [lsp] wait_until_idle: settled after {drained} messages"
+                    );
+                    return;
+                }
+                Err(RecvTimeoutError::Disconnected) => return,
+            }
+        }
+    }
+
     /// Get outgoing calls from a function at a specific position.
     pub fn outgoing_calls(
         &mut self,
