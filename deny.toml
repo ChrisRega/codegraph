@@ -25,20 +25,41 @@ allow = [
     "Zlib",
     "MPL-2.0",
     "CC0-1.0",
+    # velr publishes with `license = "non-standard"` in its manifest.
+    # The clarify blocks below override it with this LicenseRef
+    # placeholder so cargo-deny can validate it. See
+    # velr-ai/velr-rust-driver for the actual licence text.
+    "LicenseRef-velr-non-standard",
 ]
 confidence-threshold = 0.8
 
-# velr 0.2.x publishes its Cargo.toml with `license = "non-standard"`
-# instead of an SPDX identifier, so cargo-deny can't validate it against
-# the allow-list above. We accept it explicitly here. See velr-ai/velr-
-# rust-driver for the actual licence text.
-exceptions = [
-    { name = "velr",                          allow = ["non-standard"] },
-    { name = "velr-runtime-linux-aarch64",    allow = ["non-standard"] },
-    { name = "velr-runtime-linux-x86_64",     allow = ["non-standard"] },
-    { name = "velr-runtime-macos-universal",  allow = ["non-standard"] },
-    { name = "velr-runtime-windows-x86_64",   allow = ["non-standard"] },
-]
+# Override velr's unparseable `license = "non-standard"` with a
+# LicenseRef placeholder we control. This documents *that* we accept
+# velr's terms; it does not change them.
+[[licenses.clarify]]
+name = "velr"
+expression = "LicenseRef-velr-non-standard"
+license-files = []
+
+[[licenses.clarify]]
+name = "velr-runtime-linux-aarch64"
+expression = "LicenseRef-velr-non-standard"
+license-files = []
+
+[[licenses.clarify]]
+name = "velr-runtime-linux-x86_64"
+expression = "LicenseRef-velr-non-standard"
+license-files = []
+
+[[licenses.clarify]]
+name = "velr-runtime-macos-universal"
+expression = "LicenseRef-velr-non-standard"
+license-files = []
+
+[[licenses.clarify]]
+name = "velr-runtime-windows-x86_64"
+expression = "LicenseRef-velr-non-standard"
+license-files = []
 
 [bans]
 multiple-versions = "warn"
