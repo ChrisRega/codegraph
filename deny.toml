@@ -28,6 +28,18 @@ allow = [
 ]
 confidence-threshold = 0.8
 
+# velr 0.2.x publishes its Cargo.toml with `license = "non-standard"`
+# instead of an SPDX identifier, so cargo-deny can't validate it against
+# the allow-list above. We accept it explicitly here. See velr-ai/velr-
+# rust-driver for the actual licence text.
+exceptions = [
+    { name = "velr",                          allow = ["non-standard"] },
+    { name = "velr-runtime-linux-aarch64",    allow = ["non-standard"] },
+    { name = "velr-runtime-linux-x86_64",     allow = ["non-standard"] },
+    { name = "velr-runtime-macos-universal",  allow = ["non-standard"] },
+    { name = "velr-runtime-windows-x86_64",   allow = ["non-standard"] },
+]
+
 [bans]
 multiple-versions = "warn"
 wildcards = "warn"
