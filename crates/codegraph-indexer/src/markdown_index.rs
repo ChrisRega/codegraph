@@ -54,6 +54,23 @@ pub fn index_markdown_files(
         let line_count = src.lines().count();
         let doc_qn = rel.clone();
 
+        // K10: per-file wipe BEFORE re-creating. Without this, every
+        // incremental/live pass CREATEs a fresh :Doc + :DocSection set
+        // on top of the previous ones; over 40 passes this workspace's
+        // README.md alone accumulated 432 :DocSection nodes for ~10
+        // real headings. The `is_full` global wipe at the top of this
+        // function covers cold runs; this per-file wipe covers
+        // incremental ones.
+        let doc_lit = escape_str(&doc_qn);
+        let section_prefix = escape_str(&format!("{rel}#"));
+        let _ = db.run(&format!(
+            "MATCH (s:DocSection) WHERE s.qualified_name STARTS WITH {section_prefix} \
+             DETACH DELETE s"
+        ));
+        let _ = db.run(&format!(
+            "MATCH (d:Doc {{qualified_name: {doc_lit}}}) DETACH DELETE d"
+        ));
+
         write_doc_node(db, &doc_qn, &title, rel, line_count);
         docs += 1;
 

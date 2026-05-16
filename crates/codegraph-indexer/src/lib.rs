@@ -873,11 +873,51 @@ fn phase_test_tagging(db: &Db) {
         db,
         "MATCH (f:Function) WHERE f.body CONTAINS '#[tokio::test]' SET f:Test",
     );
-    run(db, "MATCH ()-[r:TESTS]->() DELETE r");
-    run(
-        db,
-        "MATCH (t:Test)-[:CALLS]->(f:Function) WHERE NOT f:Test CREATE (t)-[:TESTS]->(f)",
-    );
+    // K9: rebuild [:TESTS] edges with explicit client-side dedup.
+    //
+    // Previous attempts that DON'T work in velr 0.2.16:
+    //   • Unanchored `MATCH ()-[r:TESTS]->() DELETE r` — didn't bind,
+    //     observed 6204 edges accumulated across ~40 passes.
+    //   • Anchored wipe + `MERGE (t)-[:TESTS]->(f)` on a row-by-row
+    //     match — MERGE on relationships in velr 0.2.16 does NOT
+    //     dedupe. A single matching `:CALLS` row produced 12 `:TESTS`
+    //     edges between the same pair in one shot. velr bug.
+    //
+    // Working pattern: anchored wipe, collect distinct (t, f) pairs in
+    // Rust, then issue one CREATE per pair. The DB only ever sees
+    // single-row creates so it can't multiply.
+    run(db, "MATCH (a)-[r:TESTS]->(b) DELETE r");
+    let pairs_q = "MATCH (t:Test)-[:CALLS]->(f:Function) WHERE NOT f:Test \
+                   RETURN DISTINCT t.qualified_name AS t, f.qualified_name AS f";
+    if let Ok(t) = db.query(pairs_q) {
+        let mut seen: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
+        for row in &t.rows {
+            let tq = row
+                .first()
+                .and_then(|c| c.as_str())
+                .unwrap_or("")
+                .to_string();
+            let fq = row
+                .get(1)
+                .and_then(|c| c.as_str())
+                .unwrap_or("")
+                .to_string();
+            if tq.is_empty() || fq.is_empty() || !seen.insert((tq.clone(), fq.clone())) {
+                continue;
+            }
+            run(
+                db,
+                &format!(
+                    "MATCH (t:Test {{qualified_name: {tl}}}), \
+                           (f:Function {{qualified_name: {fl}}}) \
+                     CREATE (t)-[:TESTS]->(f)",
+                    tl = escape_str(&tq),
+                    fl = escape_str(&fq),
+                ),
+            );
+        }
+    }
 }
 
 /// Persist sidecar metadata so the next CLI/Auto run starts from the
@@ -2458,6 +2498,48 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// K9 contract: a single Phase 6 run must NOT multiply `[:TESTS]`
+    /// edges even when the same (test, target) pair is matched multiple
+    /// times by the upstream `:CALLS` rows — velr 0.2.16's MERGE on
+    /// relationships doesn't dedupe, so this hits the client-side
+    /// dedup path. AND repeated passes must stay idempotent.
+    #[test]
+    fn phase_test_tagging_is_idempotent_across_runs() {
+        let db = codegraph_core::Db::open_in_memory().unwrap();
+        db.run(
+            "CREATE (:Function {qualified_name: 'm::test_a', name: 'test_a', \
+             body: '#[test]\\nfn test_a() { foo(); }'})",
+        )
+        .unwrap();
+        db.run("CREATE (:Function {qualified_name: 'm::foo', name: 'foo', body: 'fn foo() {}'})")
+            .unwrap();
+        // Seed TWO :CALLS edges between the same (test, target) pair —
+        // exercises the client-side dedup. A naive MERGE would emit 2
+        // [:TESTS] edges here; the correct count is 1.
+        for _ in 0..2 {
+            db.run(
+                "MATCH (a:Function {qualified_name: 'm::test_a'}), \
+                       (b:Function {qualified_name: 'm::foo'}) CREATE (a)-[:CALLS]->(b)",
+            )
+            .unwrap();
+        }
+
+        // Three passes should leave exactly one [:TESTS] edge regardless.
+        for _ in 0..3 {
+            phase_test_tagging(&db);
+        }
+        let n = db
+            .query("MATCH (a)-[r:TESTS]->(b) RETURN count(r) AS c")
+            .unwrap()
+            .rows[0][0]
+            .as_i64()
+            .unwrap();
+        assert_eq!(
+            n, 1,
+            "[:TESTS] should stay at 1 despite 2 upstream :CALLS × 3 passes"
+        );
     }
 
     #[test]
