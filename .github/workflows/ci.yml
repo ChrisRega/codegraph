@@ -56,7 +56,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install pinned MSRV toolchain
-        run: rustup toolchain install 1.75 --profile minimal
+        run: rustup toolchain install 1.95 --profile minimal
       - uses: Swatinem/rust-cache@v2
       - name: cargo build (MSRV)
-        run: cargo +1.75 build --workspace
+        run: cargo +1.95 build --workspace

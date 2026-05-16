@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **MSRV bumped from 1.75 → 1.95.** velr 0.2.16's transitive deps
+  (`blake3` → `cpufeatures`, `constant_time_eq`) now require
+  `edition2024`, which Cargo 1.75 doesn't know. Bumping to current
+  stable is the pragmatic fix; the CI `msrv` job now pins 1.95.
+
 ### Added
 
 - **Go language support.** New `ProjectKind::Go` variant detected by

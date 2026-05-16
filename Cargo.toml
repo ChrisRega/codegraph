@@ -22,7 +22,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/ChrisRega/codegraph"
 homepage = "https://github.com/ChrisRega/codegraph"
 authors = ["Christopher Regali <chris.vdop@gmail.com>"]
-rust-version = "1.75"
+rust-version = "1.95"
 
 [workspace.dependencies]
 velr        = "0.2.16"
