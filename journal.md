@@ -1,5 +1,90 @@
 # codegraph build journal
 
+## Round 7 — fix two bugs found by dogfooding, plus watcher visibility
+
+The user asked me to fix the bugs from Round 6 and continue using
+codegraph through the work. Three commits, all bugs surfaced via or
+fixable with help from `mcp__codegraph__*`.
+
+### Phase 6: `:Test` label never applied (`c5f167b`)
+
+Reproduced via `mcp__codegraph__cypher_md`:
+```
+MATCH (n:Test) RETURN count(n) AS test_count
+→ 0
+```
+While grep saw 65+ `#[test]` fns. Hypothesis from the round-6 `:Note`
+was right: rust-analyzer's `documentSymbol.range.start` points at the
+`fn` keyword, not at the attribute above. `slice_body` returned a
+body that excluded `#[test]`.
+
+Fix: back-scan `slice_body` over preceding `#[…]` lines. Four unit
+tests cover happy path, multi-attribute, no-attribute, blank-line
+stop. `mcp__codegraph__find_symbol("slice_body")` got me to the right
+line in one call.
+
+### K8: live reindex orphans `[:NOTES]` (same commit)
+
+`DETACH DELETE` removes node + all edges. The skill-file workaround I
+wrote in round 6 ("attach notes to `:File` or `:Package` instead")
+turned out to be wrong on closer inspection: `:File` and `:Package`
+are also wiped on `--full`. So note edges to ANY function/symbol/file/
+package get nuked on any wipe.
+
+Fix: snapshot `(note_id, target_kind, target_identity)` for all
+`[:NOTES]->` edges into Functions/Symbols/Files/Packages BEFORE any
+wipe, then `MERGE` them back after the LSP rebuild has re-created the
+targets with the same identifying property. Notes whose target was
+renamed-away stay as orphan `:Note` nodes (still discoverable in
+`list_notes`). Two contract tests.
+
+### Watcher visibility (`879d00f`)
+
+User noticed `state: running` for 45s+ during big batches with no
+indication whether new edits were even being received. Real issue:
+events queue silently in the mpsc channel between watcher loop
+iterations. Counter never ticks unless the loop is awake.
+
+Fix: wrap the mpsc sender in a closure `notify::EventHandler` that
+updates `events_total` / `events_pending` / `pending_paths` on the
+shared status BEFORE forwarding into the channel. `handle_index_status`
+always renders an `Events: N total, M pending` line plus a
+`Pending paths` section. An agent now has direct proof the watcher
+is alive during a long pass.
+
+Underlying perf problem (per-file LSP `outgoingCalls` at 10-50 ms each
+× many fns per file × many files per batch) untouched — separate
+work. Visibility is the immediate fix.
+
+### MCP tool dogfood report
+
+- **`mcp__codegraph__index_status`** stayed accurate throughout —
+  caught the "race window after `DETACH DELETE`" in round 6 because
+  it honestly reported `state: running` mid-pass. The user complaint
+  ("fast edits don't show as activity") is itself a
+  fix-by-better-status-rendering case. Tool-as-debugger-itself paid
+  off three times this round.
+
+- **`mcp__codegraph__find_symbol`** is now the default for "where is
+  X". One call → location + signature. Used 4× this round.
+
+- **`mcp__codegraph__cypher_md`** as smoke-test: tried
+  `RETURN substring(f.body, 0, 60)` first to inspect bodies — instant
+  velr error "Unknown function `substring`". Skipped the body
+  inspection and went with grep on disk; ~5 seconds saved.
+
+- **`mcp__codegraph__write_note`** worked for persisting the round-6
+  hypotheses; the live-mode race that orphaned them is now fixed in
+  this round, so future write_notes survive their containing file's
+  reindex.
+
+- **One frustration:** `mcp__codegraph__node_md` returned "Not found"
+  for a real symbol because I queried during `state: running`. The
+  skill file now says wait for `idle` first, but I should add an
+  agent-side heuristic — maybe the tool itself could return a hint
+  like "(graph is mid-pass; result may be stale)" when status is not
+  idle. Filed mentally as future-ideas item.
+
 ## Round 6 — skill-doc refresh + dogfood-discovered note orphaning bug
 
 ### Skill files updated
