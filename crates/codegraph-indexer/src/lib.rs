@@ -327,14 +327,18 @@ fn run_indexer_inner(opts: IndexOptions, pool: Option<&mut LspPool>) -> Result<I
 
     let rs_files = source_files;
 
-    let files_to_index: Vec<&(PathBuf, String, String)> = if is_full {
+    let (files_to_index, calls_snapshot): (
+        Vec<&(PathBuf, String, String)>,
+        lsp_index::CallsSnapshot,
+    ) = if is_full {
         eprintln!("  [*] Clearing old code nodes...");
         run(&db, "MATCH (n:Symbol) DETACH DELETE n");
         run(&db, "MATCH (n:Function) DETACH DELETE n");
         run(&db, "MATCH (n:Field) DETACH DELETE n");
         run(&db, "MATCH (n:Parameter) DETACH DELETE n");
         run(&db, "MATCH (n:Import) DETACH DELETE n");
-        rs_files.iter().collect()
+        // Full mode is a clean rebuild — no body-hash matches possible.
+        (rs_files.iter().collect(), lsp_index::CallsSnapshot::new())
     } else {
         let changed_set: HashSet<&str> = changed_files.iter().map(|s| s.as_str()).collect();
         let candidates: Vec<&(PathBuf, String, String)> = rs_files
@@ -349,6 +353,21 @@ fn run_indexer_inner(opts: IndexOptions, pool: Option<&mut LspPool>) -> Result<I
         let (to_reindex, skipped_unchanged) = filter_unchanged_by_hash(&db, candidates);
         if skipped_unchanged > 0 {
             eprintln!("  [=] Skipped {skipped_unchanged} file(s) with unchanged content hash");
+        }
+        // Perf: snapshot (qn -> body_hash + CALLS callees) for every
+        // function about to be wiped. After the LSP re-creates them
+        // with fresh body_hash, the CALLS-rebuild loop replays edges
+        // for unchanged-body fns without burning `outgoingCalls` round-
+        // trips — typically the dominant cost.
+        let snapshot = snapshot_calls_by_qn(
+            &db,
+            to_reindex.iter().map(|(_, rel, _)| rel.as_str()).collect(),
+        );
+        if !snapshot.is_empty() {
+            eprintln!(
+                "  [+] Snapshotted CALLS for {} fn(s) (skip LSP for unchanged bodies)",
+                snapshot.len()
+            );
         }
 
         for (_, rel_path, _) in &to_reindex {
@@ -389,7 +408,7 @@ fn run_indexer_inner(opts: IndexOptions, pool: Option<&mut LspPool>) -> Result<I
             }
         }
 
-        to_reindex
+        (to_reindex, snapshot)
     };
 
     eprintln!(
@@ -422,6 +441,7 @@ fn run_indexer_inner(opts: IndexOptions, pool: Option<&mut LspPool>) -> Result<I
                 &mut pc.opened,
                 initial_warmup,
                 &owned_files,
+                &calls_snapshot,
                 &workspace,
             );
             pc.warmed_up = true;
@@ -447,6 +467,7 @@ fn run_indexer_inner(opts: IndexOptions, pool: Option<&mut LspPool>) -> Result<I
                 &mut opened,
                 true,
                 &owned_files,
+                &calls_snapshot,
                 &workspace,
             );
             if let Err(e) = lsp.shutdown() {
@@ -614,6 +635,51 @@ fn filter_unchanged_by_hash<'a>(
         }
     }
     (retained, skipped)
+}
+
+// Snapshot `(qualified_name -> (body_hash, [callee_names]))` for every
+// `:Function` defined in any of `paths`, capturing both the body hash
+// and the outgoing CALLS that exist *now*. The CALLS-rebuild loop in
+// `index_files_via_lsp` uses this to skip the `outgoingCalls` LSP
+// round-trip for any fn whose body hash didn't change — typical
+// single-fn edits leave 9/10 fns per file untouched.
+fn snapshot_calls_by_qn(db: &Db, paths: Vec<&str>) -> lsp_index::CallsSnapshot {
+    let mut snap: lsp_index::CallsSnapshot = lsp_index::CallsSnapshot::new();
+    if paths.is_empty() {
+        return snap;
+    }
+    let in_list = paths
+        .iter()
+        .map(|p| escape_str(p))
+        .collect::<Vec<_>>()
+        .join(",");
+    let q = format!(
+        "MATCH (f:Function)-[:DEFINED_IN]->(file:File) \
+         WHERE file.path IN [{in_list}] \
+         OPTIONAL MATCH (f)-[:CALLS]->(c:Function) \
+         RETURN f.qualified_name AS qn, f.body_hash AS h, c.name AS callee"
+    );
+    let t = match db.query(&q) {
+        Ok(t) => t,
+        Err(_) => return snap,
+    };
+    for row in &t.rows {
+        let qn = row
+            .first()
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .to_string();
+        let h = row.get(1).and_then(|c| c.as_i64()).unwrap_or(0);
+        let callee = row.get(2).and_then(|c| c.as_str()).map(|s| s.to_string());
+        if qn.is_empty() {
+            continue;
+        }
+        let entry = snap.entry(qn).or_insert((h, Vec::new()));
+        if let Some(name) = callee {
+            entry.1.push(name);
+        }
+    }
+    snap
 }
 
 // K8: snapshot `(note_id, target_kind, target_identity)` for every
@@ -1816,6 +1882,45 @@ fn phase_watch_triggers(db: &Db, head_hash: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshot_calls_by_qn_collects_body_hash_and_callees() {
+        let db = codegraph_core::Db::open_in_memory().unwrap();
+        // Seed: file with two functions; one of them calls another fn
+        // (callee) defined elsewhere, plus an unrelated fn we DON'T
+        // want surfaced.
+        db.run("CREATE (:File {path: 'src/x.rs', content_hash: 0})")
+            .unwrap();
+        db.run("CREATE (:Function {qualified_name: 'm::foo', name: 'foo', body_hash: 11})")
+            .unwrap();
+        db.run("CREATE (:Function {qualified_name: 'm::bar', name: 'bar', body_hash: 22})")
+            .unwrap();
+        // Callee defined elsewhere — body_hash irrelevant, we only need its `name`.
+        db.run("CREATE (:Function {qualified_name: 'lib::callee', name: 'callee'})")
+            .unwrap();
+        for fn_qn in ["m::foo", "m::bar"] {
+            db.run(&format!(
+                "MATCH (f:Function {{qualified_name: '{fn_qn}'}}), \
+                       (file:File {{path: 'src/x.rs'}}) \
+                 CREATE (f)-[:DEFINED_IN]->(file)"
+            ))
+            .unwrap();
+        }
+        db.run(
+            "MATCH (a:Function {qualified_name: 'm::foo'}), \
+                   (b:Function {qualified_name: 'lib::callee'}) CREATE (a)-[:CALLS]->(b)",
+        )
+        .unwrap();
+
+        let snap = snapshot_calls_by_qn(&db, vec!["src/x.rs"]);
+        assert_eq!(snap.len(), 2);
+        let (foo_h, foo_callees) = snap.get("m::foo").expect("foo missing");
+        assert_eq!(*foo_h, 11);
+        assert_eq!(foo_callees, &vec!["callee".to_string()]);
+        let (bar_h, bar_callees) = snap.get("m::bar").expect("bar missing");
+        assert_eq!(*bar_h, 22);
+        assert!(bar_callees.is_empty(), "bar has no CALLS");
+    }
 
     #[test]
     fn filter_unchanged_by_hash_drops_matches_retains_misses() {

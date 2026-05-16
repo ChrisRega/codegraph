@@ -32,6 +32,14 @@ fn open_or_change(
     }
 }
 
+/// Snapshot of pre-wipe CALLS state: `qn -> (body_hash, [callee_names])`.
+/// Built by `lib::snapshot_calls_by_qn` from the to-be-wiped files
+/// before they're DETACH DELETEd. After `walk_symbols` re-creates the
+/// `:Function` nodes with fresh `body_hash` values, we compare per-fn:
+/// if the body hash matches, we can replay the snapshotted CALLS
+/// without burning an `outgoingCalls` LSP round-trip.
+pub type CallsSnapshot = std::collections::HashMap<String, (i64, Vec<String>)>;
+
 /// Index all source files in the workspace using the given LSP client.
 ///
 /// `opened` tracks which files have been `didOpen`-ed on this client so
@@ -43,6 +51,11 @@ fn open_or_change(
 /// LSP — controls whether we sleep 15s after the bulk open (cold start)
 /// or just 1s (server already idle).
 ///
+/// `calls_snapshot`, when non-empty, lets the CALLS-rebuild loop skip
+/// `outgoingCalls` for any function whose `body_hash` matches the
+/// snapshotted value — typical incremental edits change ≤1 fn body per
+/// file, so the other 9 fns avoid the LSP round-trip entirely.
+///
 /// Returns `(symbols_count, functions_count, calls_count)`.
 pub fn index_files_via_lsp(
     db: &Db,
@@ -50,13 +63,14 @@ pub fn index_files_via_lsp(
     opened: &mut HashMap<PathBuf, i32>,
     initial_warmup: bool,
     files: &[(PathBuf, String, String)],
+    calls_snapshot: &CallsSnapshot,
     _workspace: &Path,
 ) -> (u32, u32, u32) {
     let mut total_symbols = 0u32;
     let mut total_functions = 0u32;
     let mut total_calls = 0u32;
 
-    let mut fn_positions: Vec<(PathBuf, u32, u32, String)> = Vec::new();
+    let mut fn_positions: Vec<(PathBuf, u32, u32, String, i64)> = Vec::new();
 
     eprintln!("  [*] Opening {} files in LSP server...", files.len());
     for (abs_path, _, _) in files {
@@ -151,7 +165,7 @@ pub fn index_files_via_lsp(
     if !fn_positions.is_empty() {
         let current_qns: HashSet<&str> = fn_positions
             .iter()
-            .map(|(_, _, _, qn)| qn.as_str())
+            .map(|(_, _, _, qn, _)| qn.as_str())
             .collect();
         let qns: Vec<&&str> = current_qns.iter().collect();
         for chunk in qns.chunks(100) {
@@ -170,7 +184,33 @@ pub fn index_files_via_lsp(
         }
     }
 
-    for (abs_path, line, character, caller_qn) in &fn_positions {
+    let mut calls_skipped_via_hash = 0u32;
+    for (abs_path, line, character, caller_qn, body_hash) in &fn_positions {
+        // Body-hash skip: if this fn's body is byte-identical to its
+        // pre-wipe snapshot, its outgoing CALLS are guaranteed identical
+        // too. Re-attach from snapshot, no LSP round-trip.
+        if let Some((old_hash, old_callees)) = calls_snapshot.get(caller_qn) {
+            if *old_hash == *body_hash {
+                let mut seen = HashSet::new();
+                for callee_name in old_callees {
+                    if !seen.insert(callee_name.clone()) {
+                        continue;
+                    }
+                    run(
+                        db,
+                        &format!(
+                            "MATCH (a:Function {{qualified_name: {caller}}}), (b:Function {{name: {callee}}}) CREATE (a)-[:CALLS]->(b)",
+                            caller = escape_str(caller_qn),
+                            callee = escape_str(callee_name),
+                        ),
+                    );
+                    total_calls += 1;
+                }
+                calls_skipped_via_hash += 1;
+                continue;
+            }
+        }
+
         let calls = match lsp.outgoing_calls(abs_path, *line, *character) {
             Ok(c) => c,
             Err(_) => continue,
@@ -193,6 +233,11 @@ pub fn index_files_via_lsp(
             total_calls += 1;
         }
     }
+    if calls_skipped_via_hash > 0 {
+        eprintln!(
+            "  [=] Skipped outgoingCalls for {calls_skipped_via_hash} fn(s) with unchanged body_hash"
+        );
+    }
 
     (total_symbols, total_functions, total_calls)
 }
@@ -205,7 +250,7 @@ fn walk_symbols(
     rel_file_path: &str,
     abs_path: &Path,
     file_lines: &[&str],
-    fn_positions: &mut Vec<(PathBuf, u32, u32, String)>,
+    fn_positions: &mut Vec<(PathBuf, u32, u32, String, i64)>,
     total_symbols: &mut u32,
     total_functions: &mut u32,
 ) {
@@ -232,8 +277,9 @@ fn walk_symbols(
                 };
 
                 let body = slice_body(file_lines, line_start, line_end);
+                let body_hash = fnv1a_64(body.as_bytes()) as i64;
                 run(db, &format!(
-                    "CREATE (fn:Function {{qualified_name: {qn_lit}, name: {name_lit}, kind: {fk}, line_start: {line_start}, line_end: {line_end}, body: {body_lit}}})",
+                    "CREATE (fn:Function {{qualified_name: {qn_lit}, name: {name_lit}, kind: {fk}, line_start: {line_start}, line_end: {line_end}, body: {body_lit}, body_hash: {body_hash}}})",
                     fk = escape_str(fn_kind),
                     body_lit = escape_str(&body),
                 ));
@@ -246,6 +292,7 @@ fn walk_symbols(
                     sym.selection_range.start.line,
                     sym.selection_range.start.character,
                     qualified_name.clone(),
+                    body_hash,
                 ));
                 *total_functions += 1;
             }
