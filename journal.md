@@ -1,5 +1,82 @@
 # codegraph build journal
 
+## Round 8 — Phase 8 working-tree overlay + dogfood-found CG bugs
+
+User asked for the save-time `:GitCommit` overlay so `diff_since`
+reflects uncommitted edits. While exploring `handle_diff_since` to
+design it, I caught two real CG bugs.
+
+### Phase 8 (`e149996`)
+
+Design: don't pollute persistent history. Instead, project the
+working tree onto a pseudo `:GitCommit:WorkingTree {hash:
+'WORKING-TREE'}` node updated on every indexer pass.
+
+- Dirty tree: MERGE the overlay, move `:SNAPSHOT_OF` from real HEAD
+  onto it, add `:PARENT_OF` from HEAD → overlay.
+- Clean tree: DETACH DELETE overlay, re-anchor `:SNAPSHOT_OF` on
+  real HEAD.
+
+`diff_since` needs zero changes — its existing
+`MATCH (h:GitCommit)-[:SNAPSHOT_OF]->(:Workspace) LIMIT 1` picks up
+the overlay because `WorkingTree` carries the `:GitCommit` label too.
+
+One bug caught by the test: `cmd_output` trims the whole git output,
+which strips a leading-space status char from worktree-modified
+files (` M a.txt` → `M a.txt`, shifting the path one column left).
+My first parser sliced at byte 3 and lost the first char of every
+modified path. Replaced with "split on first space, take the rest"
+— robust to both shapes plus rename arrows.
+
+Test exercises a real temp git repo: clean → dirty (modify+untracked)
+→ committed-clean cycle. Asserts overlay creation, SNAPSHOT_OF
+migration, PARENT_OF wiring, and overlay teardown. Workspace 80/80.
+
+### Two CG bugs surfaced via dogfooding the tools
+
+While running `mcp__codegraph__node_md` on `handle_diff_since` to
+understand the call/test/doc-mentions surface:
+
+- **K9: `[:TESTS]` edges duplicated.** Saw `38` incoming `:TESTS`
+  from a single test function. Phase 6's
+  `CREATE (t)-[:TESTS]->(f)` should be `MERGE`. Worse: the
+  unconditional `MATCH ()-[r:TESTS]->() DELETE r` is meant to wipe
+  before re-deriving, so duplicates can only come from upstream
+  duplicate `:CALLS` edges. Worth a deeper audit.
+
+- **K10: `:DocSection` / `[:MENTIONS]` accumulate massively.** Saw
+  `253` incoming `[:MENTIONS]` from `refactoring.md#why` on the same
+  function. The full-reindex wipe set excludes `:Doc`/`:DocSection`,
+  and live mode has no per-file markdown wipe. **Distorts every
+  `node_md` neighbour ranking and `explore` score today** — `Db::run`
+  shows degree 28090 because of mention bloat. Filed as priority bump
+  in TODO.
+
+Both findings persisted as `:Note` nodes on the affected functions
+so future `node_md` calls surface them automatically. Mental model:
+the dogfooding loop discovered architectural problems in the tools
+themselves WHILE doing user-facing work. That's the multiplier — I
+wouldn't have noticed the rank-distortion without seeing the wrong
+neighbour ordering on a specific node I was analysing for unrelated
+reasons.
+
+### MCP tools usage this round
+
+- `mcp__codegraph__find_symbol` → 3 calls, all single-shot wins.
+- `mcp__codegraph__node_md` → 1 call that surfaced BOTH the design
+  context (callers/callees of handle_diff_since) AND two unrelated
+  CG bugs (over-counted edges). Best ROI of any tool this round.
+- `mcp__codegraph__cypher_md` → 2 quick queries to count :GitCommit
+  / inspect SNAPSHOT_OF state before designing the overlay.
+- `mcp__codegraph__write_note` → 2 calls to persist the K9/K10
+  findings. With K8 (notes survive reindex) shipped, these will
+  surface in future `node_md(phase_test_tagging)` / `node_md(
+  index_markdown_files)` calls automatically.
+- `mcp__codegraph__index_status` → 1 call to confirm watcher idle
+  before queries. Showed `Events: 7137 total` — confirms how much
+  spurious notify activity there is, supporting the file-content-hash
+  skip from `4f3bf2a`.
+
 ## Round 7 — fix two bugs found by dogfooding, plus watcher visibility
 
 The user asked me to fix the bugs from Round 6 and continue using
