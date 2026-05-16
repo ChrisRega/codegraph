@@ -5,9 +5,14 @@ members = [
     "crates/codegraph-indexer",
     "crates/codegraph-mcp",
 ]
-# Standalone demo project lives under examples/ and is intentionally NOT
-# part of the workspace — `codegraph-indexer` is meant to be pointed at it.
-exclude = ["examples/demo-rust"]
+# Standalone demo projects under examples/ are NOT part of the workspace —
+# `codegraph-indexer` is meant to be pointed at each of them for integration
+# testing of the Rust / Python / TypeScript paths.
+exclude = [
+    "examples/demo-rust",
+    "examples/demo-python",
+    "examples/demo-typescript",
+]
 
 [workspace.package]
 version = "0.1.0"
