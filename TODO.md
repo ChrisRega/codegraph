@@ -187,12 +187,29 @@ for, with the lowest-token answer for each question shape.
 - [x] **K5** — Indexer phase split: `phase_history`,
   `phase_test_tagging`, `phase_watch_triggers`, `save_sidecar`. The
   orchestrator's tail dropped from ~145 LoC inline to ~10 LoC.
-- [ ] **K6** — Per-tool handler split in `mcp/src/main.rs`. Still
-  3522 LoC; ~3000 LoC of handlers could move into `tools/<name>.rs`
-  files. Mechanical, deferred until next concrete itch.
+- [x] **K6** — Per-tool handler split in `mcp/src/main.rs`. Shipped
+  across 5 commits; main.rs now ~1600 LoC, every per-tool body in its
+  own sibling module (`concepts.rs`, `coverage.rs`, `diff.rs`,
+  `explore.rs`, `find.rs`, `history.rs`, `impact.rs`, `notes.rs`,
+  `pr_notes.rs`, `views.rs`, `watch_tools.rs`).
 - [ ] **K7** — `IndexCtx` / `tools::Ctx` structs. Skipped: current
   signatures aren't painful; pull forward when we add a cross-cutting
   concern (per-call timing, logging) that justifies the indirection.
+- [x] **K8** — preserve `[:NOTES]` across reindex via snapshot/restore
+  by qualified_name. Notes attached to `:Function`/`:Symbol`/`:File`/
+  `:Package` survive both `--full` and live-mode wipes.
+- [ ] **K9** — `[:TESTS]` edges duplicated each pass. Suspected cause
+  is `CREATE` instead of `MERGE` in Phase 6's CALLS→TESTS derivation
+  combined with upstream duplicate-CALLS. See `:Note` on
+  `phase_test_tagging`. **Distorts neighbour-degree ranking.**
+- [ ] **K10** — `:DocSection` / `:Doc` accumulate across reindexes;
+  `[:MENTIONS]` edges balloon by 50× over a dev session. The full
+  wipe set excludes `:Doc`/`:DocSection`; live mode has no per-file
+  markdown wipe. See `:Note` on `markdown_index::index_markdown_files`.
+  **Distorts every node_md / explore ranking today; bump priority.**
+- [x] **K11** — Phase 8 working-tree overlay: `:GitCommit:WorkingTree`
+  pseudo-commit reflects uncommitted edits as the SNAPSHOT_OF tip;
+  `diff_since` picks it up automatically.
 
 More ambitious follow-ups (reverse-Markdown round-trip, cross-repo
 federation, MCP Resources) live in [`future-ideas.md`](future-ideas.md).
