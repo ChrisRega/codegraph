@@ -1,0 +1,16 @@
+{
+  "name": "demo-typescript",
+  "version": "0.1.0",
+  "description": "Tiny demo project for codegraph-indexer (TypeScript flavour)",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  }
+}

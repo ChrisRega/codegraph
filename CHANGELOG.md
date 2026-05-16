@@ -6,6 +6,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0-alpha.1] - 2026-05-16
+
+First versioned release after the 0.1.0 initial cut. The bulk of this
+release is the agent-memory layer: the graph now persists not just
+code structure but the agent's investigations and the project's own
+worklog, all survived across `--full` reindex.
+
+Companion release notes for the items below are also queryable from
+the graph itself:
+
+```cypher
+MATCH (r:Release {version: '0.2.0-alpha.1'})-[:INCLUDES]->(w:WorklogItem)
+RETURN w.kind, w.title, w.current_status_at ORDER BY w.kind, w.title
+```
+
 ### Added
 
 - **Graph-backed worklog.** New `:WorklogItem`, `:Status`, `:Comment`
@@ -169,4 +184,5 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and `type()`) may change. The indexer / MCP server pin the entire
   feature set against velr 0.2.9 for now.
 
-[Unreleased]: https://github.com/ChrisRega/codegraph/commits/main
+[Unreleased]:      https://github.com/ChrisRega/codegraph/compare/v0.2.0-alpha.1...HEAD
+[0.2.0-alpha.1]:   https://github.com/ChrisRega/codegraph/compare/v0.1.0...v0.2.0-alpha.1
