@@ -38,9 +38,8 @@ Strike through (`~~text~~`) when done.
 
 - [x] **C1** — Each crate now has `keywords`, `categories`, `readme`,
   `documentation`, `homepage` populated.
-- [ ] **C2** — Replace placeholder `repository` URL
-  (`github.com/codegraph/codegraph`) with the real one once the GitHub
-  repo exists. Same for `homepage`.
+- [x] **C2** — `repository` and `homepage` point at
+  `github.com/ChrisRega/codegraph`.
 - [x] **C3** — `authors` populated on the workspace package metadata.
 - [x] **C4** — `deny.toml` with license allow-list, wired into CI.
 - [ ] **C5** — `rust-version = "1.75"` set but **not** verified against

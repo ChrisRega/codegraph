@@ -13,8 +13,8 @@ exclude = ["examples/demo-rust"]
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/codegraph/codegraph"
-homepage = "https://github.com/codegraph/codegraph"
+repository = "https://github.com/ChrisRega/codegraph"
+homepage = "https://github.com/ChrisRega/codegraph"
 authors = ["Christopher Regali <chris.vdop@gmail.com>"]
 rust-version = "1.75"
 

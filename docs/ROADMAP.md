@@ -57,12 +57,15 @@ _Generated from the graph by `codegraph-mcp report`. Do not edit by hand._
 
 ### pending
 
-- [ ] `[task]` **Replace placeholder repository URL in Cargo.toml** `(pending)` — _since 2026-05-10T00:00:00Z_  
-  `wl-c2-repo-url`
 - [ ] `[task]` **Verify rust-version = 1.75 locally** `(pending)` — _since 2026-05-10T00:00:00Z_  
   `wl-c5-msrv-verify`
 - [ ] `[feature]` **Pre-built release binaries via cargo-dist** `(pending)` — _since 2026-05-10T00:00:00Z_  
   `wl-f2-cargo-dist`
+
+### done
+
+- [x] `[task]` **Replace placeholder repository URL in Cargo.toml** `(done)` — _since 2026-05-16T12:30:00Z_  
+  `wl-c2-repo-url`
 
 ## viz
 

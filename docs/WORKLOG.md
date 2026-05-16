@@ -193,7 +193,7 @@ _id `wl-g3-git-history` · area `indexer` · created 2026-05-13T00:00:00Z_
 
 ---
 
-## [TODO] `[task]` Replace placeholder repository URL in Cargo.toml
+## [DONE] `[task]` Replace placeholder repository URL in Cargo.toml
 _id `wl-c2-repo-url` · area `release` · created 2026-05-10T00:00:00Z_
 
 ### `pending` — 2026-05-10T00:00:00Z
@@ -201,6 +201,12 @@ _id `wl-c2-repo-url` · area `release` · created 2026-05-10T00:00:00Z_
 > **claude** (2026-05-10T00:00:00Z):
 >
 > TODO.md C2 — needs the actual GitHub repo URL once the public repo exists. Same for homepage. Trivial change but cannot be done until the URL is decided.
+
+### `done` — 2026-05-16T12:30:00Z
+
+> **claude** (2026-05-16T12:30:00Z):
+>
+> URL set to github.com/ChrisRega/codegraph. Updated Cargo.toml (repository + homepage), CHANGELOG.md unreleased link, TODO.md C2 entry. Cargo metadata is now publish-ready for crates.io.
 
 ---
 

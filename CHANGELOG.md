@@ -169,4 +169,4 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and `type()`) may change. The indexer / MCP server pin the entire
   feature set against velr 0.2.9 for now.
 
-[Unreleased]: https://github.com/codegraph/codegraph/commits/main
+[Unreleased]: https://github.com/ChrisRega/codegraph/commits/main
