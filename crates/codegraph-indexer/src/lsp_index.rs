@@ -305,8 +305,22 @@ fn run(db: &Db, cypher: &str) {
 }
 
 fn slice_body(file_lines: &[&str], line_start: u32, line_end: u32) -> String {
-    let start = (line_start.saturating_sub(1)) as usize;
+    let mut start = (line_start.saturating_sub(1)) as usize;
     let end = (line_end as usize).min(file_lines.len());
+    // Walk backwards over preceding attribute lines so test markers
+    // (`#[test]`, `#[tokio::test]`) and other attributes (`#[derive(...)]`)
+    // end up inside `body`. rust-analyzer's `DocumentSymbol.range.start`
+    // points at the `fn`/`struct` keyword for items, not at the attribute
+    // line above — without this back-scan, Phase 6's `body CONTAINS
+    // '#[test]'` check never matches and we miss every test fn.
+    while start > 0 {
+        let prev = file_lines[start - 1].trim_start();
+        if prev.starts_with("#[") || prev.starts_with("#![") {
+            start -= 1;
+        } else {
+            break;
+        }
+    }
     if start >= end {
         return String::new();
     }
@@ -327,5 +341,70 @@ fn module_prefix_from_path(pkg_name: &str, file_path: &str) -> String {
         pkg_name.to_string()
     } else {
         format!("{}::{}", pkg_name, clean.replace('/', "::"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lines(s: &str) -> Vec<&str> {
+        s.lines().collect()
+    }
+
+    #[test]
+    fn slice_body_includes_preceding_attribute_lines() {
+        let src = "\
+some other line
+#[test]
+fn it_works() {
+    assert!(true);
+}";
+        let ls = lines(src);
+        // rust-analyzer's `range.start` would point at the `fn` keyword
+        // (line 3 in 1-based terms) — back-scan should pull in the
+        // #[test] attribute.
+        let body = slice_body(&ls, 3, 5);
+        assert!(body.contains("#[test]"), "got: {body}");
+        assert!(body.contains("fn it_works"));
+        assert!(!body.contains("some other line"));
+    }
+
+    #[test]
+    fn slice_body_back_scans_multiple_attributes() {
+        let src = "\
+preamble
+#[allow(unused)]
+#[tokio::test(flavor = \"multi_thread\")]
+async fn async_test() {
+    body
+}";
+        let ls = lines(src);
+        let body = slice_body(&ls, 4, 6);
+        assert!(body.contains("#[tokio::test"), "{body}");
+        assert!(body.contains("#[allow(unused)]"), "{body}");
+        assert!(!body.contains("preamble"));
+    }
+
+    #[test]
+    fn slice_body_handles_no_attributes() {
+        let src = "header\nfn plain() { 1 }";
+        let ls = lines(src);
+        let body = slice_body(&ls, 2, 2);
+        assert_eq!(body, "fn plain() { 1 }");
+    }
+
+    #[test]
+    fn slice_body_stops_at_blank_or_code() {
+        let src = "\
+fn earlier() {}
+
+#[test]
+fn target() {}";
+        let ls = lines(src);
+        let body = slice_body(&ls, 4, 4);
+        assert!(body.contains("#[test]"));
+        // Blank line above #[test] stops the back-scan.
+        assert!(!body.contains("fn earlier"));
     }
 }

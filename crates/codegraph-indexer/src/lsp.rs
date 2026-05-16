@@ -272,12 +272,12 @@ impl LspClient {
         let mut drained = 0u32;
         loop {
             if Instant::now() >= deadline {
-                eprintln!(
-                    "  [lsp] wait_until_idle: hit max_ms={max_ms} after {drained} messages"
-                );
+                eprintln!("  [lsp] wait_until_idle: hit max_ms={max_ms} after {drained} messages");
                 return;
             }
-            let remaining = deadline.saturating_duration_since(Instant::now()).min(silence);
+            let remaining = deadline
+                .saturating_duration_since(Instant::now())
+                .min(silence);
             match self.receiver.recv_timeout(remaining) {
                 Ok(msg) => {
                     drained = drained.saturating_add(1);
@@ -299,9 +299,7 @@ impl LspClient {
                     // Other notifications drop on the floor.
                 }
                 Err(RecvTimeoutError::Timeout) => {
-                    eprintln!(
-                        "  [lsp] wait_until_idle: settled after {drained} messages"
-                    );
+                    eprintln!("  [lsp] wait_until_idle: settled after {drained} messages");
                     return;
                 }
                 Err(RecvTimeoutError::Disconnected) => return,

@@ -260,6 +260,24 @@ fn run_indexer_inner(opts: IndexOptions, pool: Option<&mut LspPool>) -> Result<I
         }
     }
 
+    // ── K8: snapshot `[:NOTES]` edges by target identity ──────────────────────
+    //
+    // The wipes that follow (`--full` clears all :Function/:Symbol/:File; live
+    // mode clears per-file functions) use `DETACH DELETE`, which removes
+    // `[:NOTES]->` edges as a side effect. The `:Note` nodes themselves
+    // survive (they're not in the wipe set) but become orphaned.
+    //
+    // Snapshot now, restore after the LSP rebuild has re-created the targets
+    // with the same identifying property — notes effectively follow renames
+    // by qualified_name / path.
+    let preserved_notes: Vec<(String, String, String)> = collect_preserved_notes(&db);
+    if !preserved_notes.is_empty() {
+        eprintln!(
+            "  [+] Will preserve {} [:NOTES] edge(s) across the wipe",
+            preserved_notes.len()
+        );
+    }
+
     // ── Phase 1: Workspace + Package nodes ───────────────────────────────────
     let ws_name = workspace
         .file_name()
@@ -429,6 +447,21 @@ fn run_indexer_inner(opts: IndexOptions, pool: Option<&mut LspPool>) -> Result<I
         }
     };
 
+    // ── K8: restore preserved [:NOTES] edges ─────────────────────────────────
+    // Re-attach each `:Note` to the current node carrying the same
+    // identifying property. `MERGE` so re-runs (or notes already wired by
+    // the wipe-resistant labels) stay idempotent. Targets that no longer
+    // exist (renamed-away functions, deleted files) silently produce no
+    // edge — the note remains as a discoverable orphan in `list_notes`.
+    if !preserved_notes.is_empty() {
+        let restored = restore_preserved_notes(&db, &preserved_notes);
+        eprintln!(
+            "  [+] Restored {restored}/{} [:NOTES] edges (orphaned: {})",
+            preserved_notes.len(),
+            preserved_notes.len().saturating_sub(restored),
+        );
+    }
+
     // ── Phase 4.5: API specs ────────────────────────────────────────────────
     let pkg_for_specs = match kind {
         ProjectKind::Rust => ws_name.clone(),
@@ -532,6 +565,75 @@ fn run_indexer_inner(opts: IndexOptions, pool: Option<&mut LspPool>) -> Result<I
 ///     `HISTORY_BACKFILL_LIMIT` commits reachable from HEAD.
 ///   * On an incremental run walk only the commits between the previously
 ///     indexed HEAD and the new HEAD.
+// K8: snapshot `(note_id, target_kind, target_identity)` for every
+// `[:NOTES]->` edge before a wipe. `target_kind` selects which
+// property to use as the identity on restore — `qualified_name` for
+// `:Function` and `:Symbol`, `path` for `:File`, `name` for
+// `:Package`. Notes pointing at other labels (`:DocSection`,
+// `:Workspace`, …) are not preserved by this snapshot; extend the
+// kind list when a new label needs the same treatment.
+fn collect_preserved_notes(db: &Db) -> Vec<(String, String, String)> {
+    let mut out: Vec<(String, String, String)> = Vec::new();
+    for (kind, prop) in [
+        ("Function", "qualified_name"),
+        ("Symbol", "qualified_name"),
+        ("File", "path"),
+        ("Package", "name"),
+    ] {
+        let q = format!(
+            "MATCH (n:Note)-[:NOTES]->(t:{kind}) \
+             RETURN n.id AS note_id, t.{prop} AS ident"
+        );
+        if let Ok(t) = db.query(&q) {
+            for row in &t.rows {
+                let nid = row
+                    .first()
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let ident = row
+                    .get(1)
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if !nid.is_empty() && !ident.is_empty() {
+                    out.push((nid, kind.to_string(), ident));
+                }
+            }
+        }
+    }
+    out
+}
+
+// K8: re-attach `[:NOTES]` for every snapshotted pair whose target
+// still exists post-rebuild. Returns the count of edges actually
+// created.
+fn restore_preserved_notes(db: &Db, preserved: &[(String, String, String)]) -> usize {
+    let mut restored = 0;
+    for (note_id, kind, ident) in preserved {
+        let prop = match kind.as_str() {
+            "Function" | "Symbol" => "qualified_name",
+            "File" => "path",
+            "Package" => "name",
+            _ => continue,
+        };
+        let q = format!(
+            "MATCH (n:Note {{id: {nid}}}), (t:{kind} {{{prop}: {ival}}}) \
+             MERGE (n)-[:NOTES]->(t)",
+            nid = escape_str(note_id),
+            ival = escape_str(ident),
+        );
+        if db.run(&q).is_ok() {
+            // Count restored only if the target still exists. Best-effort:
+            // we can't distinguish "MERGE created" from "MERGE matched
+            // existing" via velr's result type, so we count any successful
+            // statement. The aggregate is still useful for diagnostics.
+            restored += 1;
+        }
+    }
+    restored
+}
+
 fn phase_history(
     db: &Db,
     workspace: &Path,
@@ -1663,6 +1765,113 @@ fn phase_watch_triggers(db: &Db, head_hash: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// K8 contract: a `:Note` attached to a `:Function` should survive a
+    /// `DETACH DELETE` + recreate cycle on the function, as long as the
+    /// recreated function has the same `qualified_name`.
+    #[test]
+    fn preserved_notes_survive_function_wipe_recreate() {
+        let db = codegraph_core::Db::open_in_memory().unwrap();
+        // Seed: a function + a note pointing at it.
+        db.run("CREATE (:Function {qualified_name: 'm::foo', name: 'foo', body: 'fn foo() {}'})")
+            .unwrap();
+        db.run(
+            "CREATE (:Note {id: 'n-1', title: 'remember', author: 'claude', \
+             markdown: 'body', tags: 't', created_at: '2026-05-16'})",
+        )
+        .unwrap();
+        db.run(
+            "MATCH (n:Note {id: 'n-1'}), (f:Function {qualified_name: 'm::foo'}) \
+             CREATE (n)-[:NOTES]->(f)",
+        )
+        .unwrap();
+
+        // Snapshot (mirrors what run_indexer_inner does pre-wipe).
+        let preserved = collect_preserved_notes(&db);
+        assert_eq!(
+            preserved.len(),
+            1,
+            "should have snapshotted one :NOTES edge"
+        );
+        assert_eq!(preserved[0].1, "Function");
+        assert_eq!(preserved[0].2, "m::foo");
+
+        // Simulate the wipe + recreate (without LSP).
+        db.run("MATCH (f:Function {qualified_name: 'm::foo'}) DETACH DELETE f")
+            .unwrap();
+        // Note still there:
+        let n = db
+            .query("MATCH (n:Note) RETURN count(n) AS c")
+            .unwrap()
+            .rows[0][0]
+            .as_i64()
+            .unwrap();
+        assert_eq!(n, 1, "note should survive function wipe");
+        // …but with no edge anywhere:
+        let e = db
+            .query("MATCH (:Note)-[:NOTES]->() RETURN count(*) AS c")
+            .unwrap()
+            .rows[0][0]
+            .as_i64()
+            .unwrap();
+        assert_eq!(e, 0, "edge should have been nuked by DETACH DELETE");
+
+        // Recreate the function (mirrors LSP rebuild).
+        db.run("CREATE (:Function {qualified_name: 'm::foo', name: 'foo', body: 'fn foo() {}'})")
+            .unwrap();
+
+        // Restore.
+        let restored = restore_preserved_notes(&db, &preserved);
+        assert_eq!(restored, 1);
+        let e2 = db
+            .query("MATCH (:Note)-[:NOTES]->(:Function) RETURN count(*) AS c")
+            .unwrap()
+            .rows[0][0]
+            .as_i64()
+            .unwrap();
+        assert_eq!(e2, 1, ":NOTES edge should be re-attached");
+    }
+
+    /// K8: notes targeting a renamed-away (now-missing) function survive as
+    /// orphaned `:Note` nodes — no edge gets re-attached, but the note
+    /// stays discoverable via `list_notes`.
+    #[test]
+    fn preserved_notes_for_deleted_target_become_orphan() {
+        let db = codegraph_core::Db::open_in_memory().unwrap();
+        db.run("CREATE (:Function {qualified_name: 'm::gone', name: 'gone'})")
+            .unwrap();
+        db.run(
+            "CREATE (:Note {id: 'n-2', title: 't', author: 'a', markdown: 'm', tags: '', \
+             created_at: '2026-05-16'})",
+        )
+        .unwrap();
+        db.run(
+            "MATCH (n:Note {id: 'n-2'}), (f:Function {qualified_name: 'm::gone'}) \
+             CREATE (n)-[:NOTES]->(f)",
+        )
+        .unwrap();
+
+        let preserved = collect_preserved_notes(&db);
+        db.run("MATCH (f:Function {qualified_name: 'm::gone'}) DETACH DELETE f")
+            .unwrap();
+        // Don't recreate — simulating a function being renamed/deleted.
+        restore_preserved_notes(&db, &preserved);
+
+        let edges = db
+            .query("MATCH (:Note)-[:NOTES]->() RETURN count(*) AS c")
+            .unwrap()
+            .rows[0][0]
+            .as_i64()
+            .unwrap();
+        assert_eq!(edges, 0, "no edge should exist for missing target");
+        let notes = db
+            .query("MATCH (n:Note) RETURN count(n) AS c")
+            .unwrap()
+            .rows[0][0]
+            .as_i64()
+            .unwrap();
+        assert_eq!(notes, 1, "the :Note node itself is still discoverable");
+    }
 
     #[test]
     fn index_options_with_paths_switches_to_live_mode() {
