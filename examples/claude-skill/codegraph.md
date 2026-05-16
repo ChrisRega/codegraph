@@ -43,6 +43,11 @@ Sorted by frequency you should reach for them in a typical session.
 | `save_view(name, cypher, description?)` / `view(name, params?)` / `list_views` | Persist + replay parameterised Cypher queries as `:View` nodes. Use for queries you find yourself running repeatedly. `$key` tokens in the saved cypher get substituted via `escape_str` at run time. |
 | `watch(label, key, value)` / `unwatch` / `list_watches` | Mark a node so the next indexer pass attaches a `:Note` tagged `watch-trigger` when its body changes. Cross-session async notifications. |
 | `import_pr_notes(comments, pr?)` | Bulk-import `gh pr view --json comments` output as `:Note`s on referenced `:Function`s. |
+| `worklog_create(title, area?, status?, comment?, author?, id?, match?)` | Create a `:WorklogItem` with an initial `:Status` (default `pending`). Optional first `:Comment` and `[:RELATES_TO]` edges to existing nodes (via Cypher MATCH binding `t`). Use this when starting any non-trivial work the user wants tracked across sessions. |
+| `worklog_set_status(id, status, comment?, author?)` | Append a new `:Status` to an existing item (status is append-only — never destructive). Allowed: `pending`, `in_progress`, `done`, `blocked`, `abandoned`. Attach a comment that summarises why the transition happened. |
+| `worklog_comment(id, body, author?)` | Attach a `:Comment` to the **latest** `:Status` of an item. Use this for thoughts that arrive AFTER the transition — retros, follow-up findings, lessons learned. |
+| `worklog_list(area?, status?, limit?)` | Markdown table of items, optionally filtered by area / current_status. Sorted by latest status timestamp. **Recall first** — check what's already in flight before starting parallel work. |
+| `worklog_md(id)` | Full dossier for one item: metadata, related nodes, the chronological `:Status` timeline, and all `:Comment` threads nested under each status. |
 
 ### Transactional writes (escape hatch)
 
@@ -62,7 +67,8 @@ Labels that appear depending on what's been written:
   `:Author`
 - **Conditional on user/tool activity:** `:Note` (from `write_note` /
   `import_pr_notes`), `:View` (from `save_view`), `:Concept` (from
-  `define_concept`), `:Watch` (from `watch`)
+  `define_concept`), `:Watch` (from `watch`), `:WorklogItem` /
+  `:Status` / `:Comment` (from the `worklog_*` tools)
 - **Derived during Phase 6:** `:Test` (added to `:Function`s whose body
   contains `#[test]` / `#[tokio::test]`)
 
@@ -76,6 +82,9 @@ Key edges:
 - BDD: `HAS_SCENARIO`, `HAS_STEP`, `IMPLEMENTED_BY`
 - Revision: `AUTHORED`, `PARENT_OF`, `SNAPSHOT_OF`
 - Annotation: `NOTES` (`:Note` → any), `DESCRIBES` (`:Concept` → any)
+- Worklog: `HAS_STATUS` (`:WorklogItem` → `:Status`, append-only),
+  `HAS_COMMENT` (`:Status` → `:Comment`, 1:n),
+  `RELATES_TO` (`:WorklogItem` → any code/doc node)
 
 Full reference: `docs/schema.md`.
 
@@ -157,16 +166,9 @@ These bit me while building the tools — bake them into your queries:
    non-obvious — a hidden coupling, a subtle invariant, a TODO buried
    in a call chain, a design decision the user just confirmed — write
    it back with `write_note`. Future `node_md` calls on the same node
-   surface it automatically.
-
-   ⚠️ **Known limitation (2026-05-16):** notes survive `--full`
-   reindex, but notes attached to a `:Function` whose containing file
-   is reparsed in **live mode** get their `[:NOTES]` edge
-   `DETACH DELETE`d along with the old function node. The `:Note`
-   node itself survives (visible in `list_notes`) but the edge to
-   the new function is gone. Until this is fixed, prefer attaching
-   notes to `:File` or `:Package` (which are MERGEd, not deleted)
-   when you want maximum durability across live-mode saves.
+   surface it automatically. Notes survive both `--full` reindex and
+   live-mode file reparses (snapshotted by `(note_id, target_kind,
+   target_identity)` and restored after the wipe).
 
 8. **Writes are real.** `write_note`, `define_concept`, `save_view`,
    `watch`, and any `write`+`commit` mutate the graph on disk. Don't
@@ -179,6 +181,42 @@ These bit me while building the tools — bake them into your queries:
    files, the index is behind. With `--watch` this fixes itself on
    the next save. Without, suggest
    `cargo run --release -p codegraph-indexer -- --workspace . --db ./codegraph.db`.
+
+10. **Track non-trivial work in the graph-backed worklog, not in
+    free-form Markdown.** The `worklog_*` tools are the canonical
+    record of "what's open, what shipped, how did it go" across
+    sessions and projects. The pattern:
+
+    - **At task start:** `worklog_create(title, area, status="in_progress",
+      comment="why this matters / what's the plan", match=<optional
+      Cypher binding `t` to the code nodes this touches>)`. The
+      `match` clause attaches `[:RELATES_TO]` edges so later
+      `node_md(those_fns)` calls surface the worklog item.
+    - **At meaningful transitions:** `worklog_set_status(id, "done"
+      | "blocked" | "abandoned", comment="what changed and why")`.
+      `:Status` is append-only — every transition is a new node, so
+      the full timeline survives. Don't try to edit prior statuses.
+    - **For thoughts that arrive later** (retro lessons, follow-up
+      findings, a related bug discovered while shipping): use
+      `worklog_comment(id, body)`. Comments attach to the *current*
+      status, so observations land in the right slice of the
+      timeline.
+    - **Before starting parallel work** or to pick up a previous
+      session: `worklog_list(status="in_progress")` /
+      `worklog_list(area="foo")` then `worklog_md(id)` for the full
+      timeline. Treat it the same way you'd treat `list_notes` —
+      recall before re-deriving.
+    - **For human-readable export** (PR descriptions, status
+      reports): run `codegraph-mcp report --db <db> --out <dir>` to
+      regenerate `ROADMAP.md` + `WORKLOG.md`. These are *generated
+      artefacts* — never hand-edit them; mutate the graph via the
+      `worklog_*` tools and re-render.
+
+    Worklog nodes survive `--full` reindex (same protection as
+    `:Note` / `:Concept` / `:View`), so the timeline accumulates
+    across the project's whole life — including across CG upgrades.
+    Per-project: each repo has its own `codegraph.db` and therefore
+    its own worklog; cross-project tracking is out of scope today.
 
 ## Quick recipes
 
@@ -233,6 +271,50 @@ write_note(
 ```
 history(limit=20)
 ```
+
+**Start tracking a non-trivial task (and link it to the code it touches):**
+```
+worklog_create(
+  title   = "Migrate auth from session cookies to JWT",
+  area    = "auth",
+  status  = "in_progress",
+  comment = "Why: legal requires shorter token lifetime. Plan: rewrite middleware first, then migrate clients in batches.",
+  match   = "MATCH (t:Function) WHERE t.qualified_name STARTS WITH 'crate::auth::middleware'"
+)
+```
+Returns an `id` like `wl-migrate-auth-...`. Hold onto it for the
+status transitions.
+
+**Append a status transition with a one-line retro:**
+```
+worklog_set_status(
+  id      = "wl-migrate-auth-20260516T1200",
+  status  = "done",
+  comment = "Shipped 2026-05-20. Discovered the existing refresh-token path was unused — deleted ~200 LoC. Migration was harder than the JWT swap itself."
+)
+```
+
+**Add a lesson learned after the fact:**
+```
+worklog_comment(
+  id   = "wl-migrate-auth-20260516T1200",
+  body = "Next time: audit clients FIRST. Half the planning effort assumed real client diversity that didn't exist."
+)
+```
+
+**Pick up a previous session — what's open in this project right now?**
+```
+worklog_list(status="in_progress")
+worklog_md(id="<the-relevant-id>")
+```
+
+**Regenerate human-readable docs from the graph (run from repo root):**
+```
+codegraph-mcp report --db ./codegraph.db --out docs/
+```
+Produces `docs/ROADMAP.md` (current state grouped by area + status,
+done items kept not deleted) and `docs/WORKLOG.md` (chronological log
+with full timeline + nested comments).
 
 **Reusable named query:**
 ```
