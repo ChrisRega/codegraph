@@ -554,6 +554,12 @@ fn run_indexer_inner(opts: IndexOptions, pool: Option<&mut LspPool>) -> Result<I
     // ── Phase 7: fire watch triggers ─────────────────────────────────────────
     phase_watch_triggers(&db, &head_hash);
 
+    // ── Phase 8: working-tree overlay ────────────────────────────────────────
+    // Project uncommitted edits onto a pseudo `:GitCommit:WorkingTree`
+    // node so `diff_since` reflects them as the tip. Idempotent: a clean
+    // tree deletes the overlay and re-anchors :SNAPSHOT_OF on real HEAD.
+    phase_working_tree_overlay(&db, &workspace, &head_hash, &ws_name);
+
     // ── Persist sidecar metadata ─────────────────────────────────────────────
     if !head_hash.is_empty() && !is_live {
         save_sidecar(&meta_path, &head_hash);
@@ -877,6 +883,87 @@ fn phase_test_tagging(db: &Db) {
 /// Persist sidecar metadata so the next CLI/Auto run starts from the
 /// commit we just indexed. Skipped in live mode by the orchestrator —
 /// the sidecar only tracks the last *committed* pass.
+/// Phase 8 — project the working-tree state onto a pseudo
+/// `:GitCommit:WorkingTree {hash: 'WORKING-TREE'}` overlay so
+/// `diff_since` reflects uncommitted edits without polluting the
+/// persistent revision history.
+///
+/// Dirty tree: MERGE the overlay node with `timestamp = now`,
+/// `files = <newline-joined list>`, then move the `:SNAPSHOT_OF`
+/// edge from the real HEAD to the overlay and add a `:PARENT_OF`
+/// from real HEAD → overlay so the DAG stays consistent.
+///
+/// Clean tree: `DETACH DELETE` any existing overlay and re-anchor
+/// `:SNAPSHOT_OF` on the real HEAD.
+///
+/// Skipped when there's no git HEAD at all (fresh repo, not in git).
+fn phase_working_tree_overlay(db: &Db, workspace: &Path, head_hash: &str, ws_name: &str) {
+    if head_hash.is_empty() {
+        return;
+    }
+    let dirty = git_dirty_files(workspace);
+    let head_lit = escape_str(head_hash);
+    let ws_lit = escape_str(ws_name);
+
+    if dirty.is_empty() {
+        // Clean tree: drop the overlay (if any) and ensure SNAPSHOT_OF
+        // is anchored on the real HEAD. MERGE is idempotent.
+        run(db, "MATCH (w:WorkingTree) DETACH DELETE w");
+        run(
+            db,
+            &format!(
+                "MATCH (c:GitCommit {{hash: {head_lit}}}), (ws:Workspace {{name: {ws_lit}}}) \
+                 MERGE (c)-[:SNAPSHOT_OF]->(ws)"
+            ),
+        );
+        return;
+    }
+
+    let now = chrono_now_iso();
+    let summary = format!("uncommitted: {} file(s)", dirty.len());
+    let file_list = dirty.join("\n");
+
+    // MERGE the overlay node. The `:WorkingTree` label is unique so it
+    // doubles as the lookup key — there's only ever one of these.
+    run(
+        db,
+        &format!(
+            "MERGE (w:GitCommit:WorkingTree {{hash: 'WORKING-TREE'}}) \
+             SET w.short_hash = 'WORKING', w.timestamp = {ts}, \
+                 w.message = {msg}, w.files = {files}",
+            ts = escape_str(&now),
+            msg = escape_str(&summary),
+            files = escape_str(&file_list),
+        ),
+    );
+
+    // Move SNAPSHOT_OF: delete any existing edge, attach to overlay.
+    // `diff_since` does `LIMIT 1` on this, so having a single edge keeps
+    // the result deterministic.
+    run(db, "MATCH ()-[r:SNAPSHOT_OF]->(:Workspace) DELETE r");
+    run(
+        db,
+        &format!(
+            "MATCH (w:WorkingTree), (ws:Workspace {{name: {ws_lit}}}) \
+             MERGE (w)-[:SNAPSHOT_OF]->(ws)"
+        ),
+    );
+
+    // PARENT_OF from real HEAD → overlay so the DAG remains complete.
+    run(
+        db,
+        &format!(
+            "MATCH (h:GitCommit {{hash: {head_lit}}}), (w:WorkingTree) \
+             MERGE (h)-[:PARENT_OF]->(w)"
+        ),
+    );
+
+    eprintln!(
+        "  [+] WorkingTree overlay: {} uncommitted file(s)",
+        dirty.len()
+    );
+}
+
 fn save_sidecar(meta_path: &Path, head_hash: &str) {
     if let Err(e) = meta::save(
         meta_path,
@@ -967,6 +1054,36 @@ fn git_changed_files(workspace: &Path, since_hash: &str) -> Vec<String> {
         .lines()
         .map(|l| l.to_string())
         .filter(|l| !l.is_empty())
+        .collect()
+}
+
+/// Files modified vs `HEAD` in the working tree, including untracked.
+/// Used by Phase 8 to detect uncommitted edits and project them onto a
+/// pseudo `:GitCommit:WorkingTree` overlay.
+fn git_dirty_files(workspace: &Path) -> Vec<String> {
+    // `--porcelain` gives one machine-readable line per affected path:
+    //   XY <path>      where XY is 1–2 status chars (M/A/D/R/C/U/?/!/space).
+    //
+    // We can't slice at a fixed offset: `cmd_output` trims the whole
+    // output, which strips a leading-space status char (worktree-only
+    // modification renders as ` M a.txt` → after trim becomes `M a.txt`,
+    // shifting the path one column left).
+    //
+    // Instead, take everything after the first space — that covers both
+    // shapes and renders renames as "old -> new" verbatim, which is
+    // good enough for the file-list we surface.
+    let output = cmd_output(workspace, &["git", "status", "--porcelain"]);
+    output
+        .lines()
+        .filter_map(|l| {
+            let space_idx = l.find(' ')?;
+            let rest = l[space_idx + 1..].trim_start();
+            if rest.is_empty() {
+                None
+            } else {
+                Some(rest.to_string())
+            }
+        })
         .collect()
 }
 
@@ -2203,6 +2320,146 @@ mod tests {
     /// Verify the Phase-6 Cypher tags `:Test` and materialises `[:TESTS]`
     /// edges from a body-content heuristic, mirroring what runs at the end
     /// of `main`.
+    /// Phase 8 contract: dirty tree creates a :WorkingTree overlay,
+    /// moves :SNAPSHOT_OF onto it, attaches :PARENT_OF from real HEAD;
+    /// re-running on a clean tree tears it down and re-anchors
+    /// :SNAPSHOT_OF on the real HEAD.
+    #[test]
+    fn phase_working_tree_overlay_cycles_with_dirty_state() {
+        let tmp =
+            std::env::temp_dir().join(format!("codegraph-overlay-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(&tmp)
+                .output()
+                .unwrap()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "T"]);
+        std::fs::write(tmp.join("a.txt"), "v1").unwrap();
+        git(&["add", "a.txt"]);
+        git(&["commit", "-q", "-m", "first"]);
+        let head = String::from_utf8(git(&["rev-parse", "HEAD"]).stdout)
+            .unwrap()
+            .trim()
+            .to_string();
+
+        let db = codegraph_core::Db::open_in_memory().unwrap();
+        // Seed: a Workspace and a real :GitCommit pointing at it.
+        db.run("CREATE (:Workspace {name: 'ws'})").unwrap();
+        db.run(&format!(
+            "CREATE (c:GitCommit {{hash: '{head}', short_hash: '{}'}})",
+            &head[..7]
+        ))
+        .unwrap();
+        db.run(&format!(
+            "MATCH (c:GitCommit {{hash: '{head}'}}), (w:Workspace) \
+             CREATE (c)-[:SNAPSHOT_OF]->(w)"
+        ))
+        .unwrap();
+
+        // 1) Clean tree → no overlay, SNAPSHOT_OF stays on real HEAD.
+        phase_working_tree_overlay(&db, &tmp, &head, "ws");
+        let n = db
+            .query("MATCH (w:WorkingTree) RETURN count(w) AS c")
+            .unwrap()
+            .rows[0][0]
+            .as_i64()
+            .unwrap();
+        assert_eq!(n, 0, "clean tree should not create overlay");
+        let snap_target = db
+            .query("MATCH (c:GitCommit)-[:SNAPSHOT_OF]->(:Workspace) RETURN c.hash AS h")
+            .unwrap()
+            .rows[0][0]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(snap_target, head);
+
+        // 2) Dirty tree (uncommitted edit) → overlay created, SNAPSHOT_OF moves.
+        std::fs::write(tmp.join("a.txt"), "v2 dirty").unwrap();
+        std::fs::write(tmp.join("b.txt"), "untracked").unwrap();
+        phase_working_tree_overlay(&db, &tmp, &head, "ws");
+
+        let n = db
+            .query("MATCH (w:WorkingTree) RETURN count(w) AS c")
+            .unwrap()
+            .rows[0][0]
+            .as_i64()
+            .unwrap();
+        assert_eq!(n, 1, "dirty tree should create exactly one overlay");
+        let snap_target = db
+            .query("MATCH (c:GitCommit)-[:SNAPSHOT_OF]->(:Workspace) RETURN c.hash AS h")
+            .unwrap()
+            .rows[0][0]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            snap_target, "WORKING-TREE",
+            "SNAPSHOT_OF should move to overlay"
+        );
+        // PARENT_OF from real HEAD to overlay should exist.
+        let par = db
+            .query(&format!(
+                "MATCH (h:GitCommit {{hash: '{head}'}})-[:PARENT_OF]->(w:WorkingTree) \
+                 RETURN count(*) AS c"
+            ))
+            .unwrap()
+            .rows[0][0]
+            .as_i64()
+            .unwrap();
+        assert_eq!(par, 1);
+        // Overlay carries the modified file list.
+        let files = db
+            .query("MATCH (w:WorkingTree) RETURN w.files AS f")
+            .unwrap()
+            .rows[0][0]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(files.contains("a.txt"), "got: {files}");
+        assert!(files.contains("b.txt"), "got: {files}");
+
+        // 3) Commit the edits → tree clean again → overlay disappears.
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "second"]);
+        let new_head = String::from_utf8(git(&["rev-parse", "HEAD"]).stdout)
+            .unwrap()
+            .trim()
+            .to_string();
+        db.run(&format!(
+            "CREATE (c:GitCommit {{hash: '{new_head}', short_hash: '{}'}})",
+            &new_head[..7]
+        ))
+        .unwrap();
+        phase_working_tree_overlay(&db, &tmp, &new_head, "ws");
+        let n = db
+            .query("MATCH (w:WorkingTree) RETURN count(w) AS c")
+            .unwrap()
+            .rows[0][0]
+            .as_i64()
+            .unwrap();
+        assert_eq!(n, 0, "clean tree should tear down overlay");
+        let snap_target = db
+            .query("MATCH (c:GitCommit)-[:SNAPSHOT_OF]->(:Workspace) RETURN c.hash AS h")
+            .unwrap()
+            .rows[0][0]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            snap_target, new_head,
+            "SNAPSHOT_OF should re-anchor on new HEAD"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     #[test]
     fn phase6_tags_tests_and_links_them() {
         let db = codegraph_core::Db::open_in_memory().unwrap();
