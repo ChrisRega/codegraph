@@ -6,6 +6,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **MSRV bumped from 1.75 → 1.95.** velr 0.2.16's transitive deps
+  (`blake3` → `cpufeatures`, `constant_time_eq`) now require
+  `edition2024`, which Cargo 1.75 doesn't know. Bumping to current
+  stable is the pragmatic fix; the CI `msrv` job now pins 1.95.
+
+### Added
+
+- **Go language support.** New `ProjectKind::Go` variant detected by
+  presence of a `go.mod`. Uses `gopls` as the LSP (override with
+  `--lsp`). `index_go_packages` parses the `module` directive and
+  `require` block from `go.mod` into `:Package` + `[:DEPENDS_ON]`
+  edges, just like the Cargo / npm / pyproject paths. Source discovery
+  walks the module root recursively (Go's convention), skipping
+  `vendor/`. New integration fixture at `examples/demo-go/` mirrors
+  the shape of the Rust / Python / TS demos.
+
 ## [0.2.0-alpha.1] - 2026-05-16
 
 First versioned release after the 0.1.0 initial cut. The bulk of this

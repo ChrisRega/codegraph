@@ -285,6 +285,7 @@ The indexer needs the LSP for the chosen language on `$PATH`:
 - Rust: [`rust-analyzer`](https://rust-analyzer.github.io/)
 - TypeScript / JavaScript: [`typescript-language-server`](https://github.com/typescript-language-server/typescript-language-server)
 - Python: [`pyright-langserver`](https://github.com/microsoft/pyright)
+- Go: [`gopls`](https://pkg.go.dev/golang.org/x/tools/gopls)
 
 Override the binary with `--lsp <path>`.
 

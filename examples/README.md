@@ -12,6 +12,7 @@ test file.
 | [`demo-rust`](demo-rust)             | `Cargo.toml`     | `rust-analyzer` |
 | [`demo-python`](demo-python)         | `pyproject.toml` | `pyright-langserver` |
 | [`demo-typescript`](demo-typescript) | `package.json`   | `typescript-language-server` |
+| [`demo-go`](demo-go)                 | `go.mod`         | `gopls` |
 
 Build once, then index each:
 
@@ -21,6 +22,7 @@ cargo build --release
 ./target/release/codegraph-indexer --workspace examples/demo-rust       --db /tmp/demo-rs.db
 ./target/release/codegraph-indexer --workspace examples/demo-python     --db /tmp/demo-py.db
 ./target/release/codegraph-indexer --workspace examples/demo-typescript --db /tmp/demo-ts.db
+./target/release/codegraph-indexer --workspace examples/demo-go         --db /tmp/demo-go.db
 ```
 
 The LSP for the chosen language must be on `$PATH` (override with

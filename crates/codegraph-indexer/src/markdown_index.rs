@@ -303,7 +303,7 @@ fn collect_short_names(db: &Db) -> HashMap<String, String> {
     {
         let names = t.column_strings("n");
         let qns = t.column_strings("qn");
-        for (n, qn) in names.into_iter().zip(qns.into_iter()) {
+        for (n, qn) in names.into_iter().zip(qns) {
             out.entry(n).or_insert(qn);
         }
     }
