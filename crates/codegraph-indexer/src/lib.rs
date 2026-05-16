@@ -337,10 +337,19 @@ fn run_indexer_inner(opts: IndexOptions, pool: Option<&mut LspPool>) -> Result<I
         rs_files.iter().collect()
     } else {
         let changed_set: HashSet<&str> = changed_files.iter().map(|s| s.as_str()).collect();
-        let to_reindex: Vec<&(PathBuf, String, String)> = rs_files
+        let candidates: Vec<&(PathBuf, String, String)> = rs_files
             .iter()
             .filter(|(_, rel, _)| changed_set.contains(rel.as_str()))
             .collect();
+        // Perf: drop files whose on-disk content hash matches the
+        // `content_hash` already stored on the `:File`. notify (and a
+        // chatty rust-analyzer) fires phantom events all the time —
+        // skipping unchanged files cuts a 30-file batch down to the 1–2
+        // files that actually changed, killing the 45 s pass time.
+        let (to_reindex, skipped_unchanged) = filter_unchanged_by_hash(&db, candidates);
+        if skipped_unchanged > 0 {
+            eprintln!("  [=] Skipped {skipped_unchanged} file(s) with unchanged content hash");
+        }
 
         for (_, rel_path, _) in &to_reindex {
             let p = escape_str(rel_path);
@@ -565,6 +574,48 @@ fn run_indexer_inner(opts: IndexOptions, pool: Option<&mut LspPool>) -> Result<I
 ///     `HISTORY_BACKFILL_LIMIT` commits reachable from HEAD.
 ///   * On an incremental run walk only the commits between the previously
 ///     indexed HEAD and the new HEAD.
+// Drop files whose on-disk content hash matches the `:File.content_hash`
+// property already stored on the graph node. Returns
+// `(retained, skipped_count)` — the retained set is what actually needs
+// re-indexing.
+//
+// Best-effort: if the file can't be read or the hash query fails, we
+// retain the file (no false-skip), trading slightly more re-indexing
+// for guaranteed correctness on read errors.
+fn filter_unchanged_by_hash<'a>(
+    db: &Db,
+    candidates: Vec<&'a (PathBuf, String, String)>,
+) -> (Vec<&'a (PathBuf, String, String)>, usize) {
+    let mut retained = Vec::with_capacity(candidates.len());
+    let mut skipped = 0usize;
+    for cand in candidates {
+        let (abs, rel, _) = cand;
+        let on_disk = match std::fs::read_to_string(abs) {
+            Ok(s) => lsp_index::fnv1a_64(s.as_bytes()) as i64,
+            Err(_) => {
+                retained.push(cand);
+                continue;
+            }
+        };
+        let q = format!(
+            "MATCH (f:File {{path: {p}}}) RETURN f.content_hash AS h LIMIT 1",
+            p = escape_str(rel),
+        );
+        let stored: Option<i64> = db
+            .query(&q)
+            .ok()
+            .and_then(|t| t.rows.into_iter().next())
+            .and_then(|r| r.into_iter().next())
+            .and_then(|c| c.as_i64());
+        if stored == Some(on_disk) {
+            skipped += 1;
+        } else {
+            retained.push(cand);
+        }
+    }
+    (retained, skipped)
+}
+
 // K8: snapshot `(note_id, target_kind, target_identity)` for every
 // `[:NOTES]->` edge before a wipe. `target_kind` selects which
 // property to use as the identity on restore — `qualified_name` for
@@ -1765,6 +1816,50 @@ fn phase_watch_triggers(db: &Db, head_hash: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn filter_unchanged_by_hash_drops_matches_retains_misses() {
+        use std::io::Write;
+        let db = codegraph_core::Db::open_in_memory().unwrap();
+
+        // Write two temp files we can read back.
+        let tmp = std::env::temp_dir().join(format!("cg-filter-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let p_same = tmp.join("same.rs");
+        let p_diff = tmp.join("diff.rs");
+        let mut f1 = std::fs::File::create(&p_same).unwrap();
+        f1.write_all(b"// stable content\n").unwrap();
+        drop(f1);
+        let mut f2 = std::fs::File::create(&p_diff).unwrap();
+        f2.write_all(b"// new content\n").unwrap();
+        drop(f2);
+
+        // Seed :File rows: `same.rs` already has the matching content_hash;
+        // `diff.rs` has a stale (different) hash.
+        let same_hash = lsp_index::fnv1a_64(b"// stable content\n") as i64;
+        let stale_hash = lsp_index::fnv1a_64(b"// older content\n") as i64;
+        db.run(&format!(
+            "CREATE (:File {{path: 'same.rs', content_hash: {same_hash}}})"
+        ))
+        .unwrap();
+        db.run(&format!(
+            "CREATE (:File {{path: 'diff.rs', content_hash: {stale_hash}}})"
+        ))
+        .unwrap();
+
+        let owned = [
+            (p_same.clone(), "same.rs".to_string(), "pkg".to_string()),
+            (p_diff.clone(), "diff.rs".to_string(), "pkg".to_string()),
+        ];
+        let candidates: Vec<&(PathBuf, String, String)> = owned.iter().collect();
+        let (retained, skipped) = filter_unchanged_by_hash(&db, candidates);
+        assert_eq!(skipped, 1, "same.rs should be skipped");
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0].1, "diff.rs");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     /// K8 contract: a `:Note` attached to a `:Function` should survive a
     /// `DETACH DELETE` + recreate cycle on the function, as long as the

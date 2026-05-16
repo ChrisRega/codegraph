@@ -85,6 +85,7 @@ pub fn index_files_via_lsp(
         let file_content = std::fs::read_to_string(abs_path).unwrap_or_default();
         let file_lines: Vec<&str> = file_content.lines().collect();
         let line_count = file_lines.len();
+        let content_hash = fnv1a_64(file_content.as_bytes()) as i64;
         let path_lit = escape_str(rel_path);
         let fname = abs_path
             .file_name()
@@ -92,10 +93,14 @@ pub fn index_files_via_lsp(
             .to_string_lossy()
             .to_string();
 
-        run(db, &format!(
-            "MERGE (f:File {{path: {path_lit}}}) SET f.name = {fn_lit}, f.extension = 'rs', f.lines = {line_count}",
-            fn_lit = escape_str(&fname),
-        ));
+        run(
+            db,
+            &format!(
+                "MERGE (f:File {{path: {path_lit}}}) SET f.name = {fn_lit}, f.extension = 'rs', \
+             f.lines = {line_count}, f.content_hash = {content_hash}",
+                fn_lit = escape_str(&fname),
+            ),
+        );
         run(db, &format!(
             "MATCH (p:Package {{name: {pn}}}), (f:File {{path: {path_lit}}}) MERGE (p)-[:CONTAINS]->(f)",
             pn = escape_str(pkg_name),
@@ -327,6 +332,21 @@ fn slice_body(file_lines: &[&str], line_start: u32, line_end: u32) -> String {
     file_lines[start..end].join("\n")
 }
 
+/// Deterministic 64-bit hash for file-content skip detection. FNV-1a:
+/// tiny, allocation-free, no random seed (unlike `DefaultHasher`),
+/// collision-resistant enough for "did this file change" deduping
+/// within a workspace.
+pub(crate) fn fnv1a_64(bytes: &[u8]) -> u64 {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut h = OFFSET;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(PRIME);
+    }
+    h
+}
+
 fn module_prefix_from_path(pkg_name: &str, file_path: &str) -> String {
     let path = file_path
         .replace('\\', "/")
@@ -392,6 +412,16 @@ async fn async_test() {
         let ls = lines(src);
         let body = slice_body(&ls, 2, 2);
         assert_eq!(body, "fn plain() { 1 }");
+    }
+
+    #[test]
+    fn fnv1a_64_is_deterministic_and_sensitive() {
+        // Same input → same hash, run after run.
+        assert_eq!(fnv1a_64(b"hello world"), fnv1a_64(b"hello world"));
+        // Changing one byte changes the hash.
+        assert_ne!(fnv1a_64(b"hello world"), fnv1a_64(b"hello worle"));
+        // Empty input is the OFFSET basis.
+        assert_eq!(fnv1a_64(b""), 0xcbf2_9ce4_8422_2325);
     }
 
     #[test]
