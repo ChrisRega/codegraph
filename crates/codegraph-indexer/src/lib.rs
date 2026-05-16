@@ -251,9 +251,11 @@ fn run_indexer_inner(opts: IndexOptions, pool: Option<&mut LspPool>) -> Result<I
     // this, re-running --full on top of an old DB stacks duplicate Workspace /
     // Package / API* nodes via the MERGE statements.
     //
-    // `:GitCommit`, `:Author` and `:Note` are intentionally excluded — they
-    // form the persistent revision history and user-attached annotations,
-    // and are kept across reindexes so we accumulate a real timeline.
+    // `:GitCommit`, `:Author`, `:Note`, `:View`, `:Concept`, `:Watch`,
+    // `:WorklogItem`, `:Status`, `:Comment` are intentionally excluded —
+    // they form the persistent revision history and user-attached
+    // annotations, and are kept across reindexes so we accumulate a real
+    // timeline.
     if is_full {
         for label in ["File", "Workspace", "Package", "APIEndpoint", "APIType"] {
             run(&db, &format!("MATCH (n:{label}) DETACH DELETE n"));

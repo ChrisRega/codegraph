@@ -40,11 +40,13 @@ mod impact;
 mod notes;
 mod pr_notes;
 mod render;
+mod report;
 mod tx;
 mod util;
 mod views;
 mod watch;
 mod watch_tools;
+mod worklog;
 use concepts::{handle_concept, handle_define_concept, handle_list_concepts};
 use coverage::handle_coverage_md;
 use diff::handle_diff_since;
@@ -60,6 +62,10 @@ use util::{err_text, ok_text, parse_node_address};
 use views::{handle_list_views, handle_save_view, handle_view};
 use watch::{handle_index_status, new_shared_status, spawn_indexer_watcher};
 use watch_tools::{handle_list_watches, handle_unwatch, handle_watch};
+use worklog::{
+    handle_worklog_comment, handle_worklog_create, handle_worklog_list, handle_worklog_md,
+    handle_worklog_set_status,
+};
 
 #[derive(Deserialize)]
 struct Request {
@@ -370,6 +376,73 @@ fn tool_list() -> Value {
                 }
             },
             {
+                "name": "worklog_create",
+                "description": "Create a new :WorklogItem with an initial :Status (default `pending`) and optional first :Comment. Optionally attach [:RELATES_TO] edges to existing nodes via a Cypher MATCH that binds variable `t`. Status must be one of: pending, in_progress, done, blocked, abandoned. Worklog items survive --full reindex.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "title":   { "type": "string", "description": "Human title (1 line)." },
+                        "area":    { "type": "string", "description": "Optional grouping tag, e.g. 'indexer', 'mcp', 'docs'." },
+                        "status":  { "type": "string", "description": "Initial status (default 'pending')." },
+                        "comment": { "type": "string", "description": "Optional first comment attached to the initial status." },
+                        "author":  { "type": "string", "description": "Comment author (default 'claude')." },
+                        "id":      { "type": "string", "description": "Optional explicit id (letters/digits/_/-). Auto-generated from title+timestamp if omitted." },
+                        "match":   { "type": "string", "description": "Optional Cypher MATCH binding `t` to link [:RELATES_TO] targets." }
+                    },
+                    "required": ["title"]
+                }
+            },
+            {
+                "name": "worklog_set_status",
+                "description": "Append a new :Status node to an existing :WorklogItem (status history is append-only). Optionally include a comment to be attached to the new status. Status timeline is queryable via the :HAS_STATUS chain.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id":      { "type": "string", "description": "Worklog item id." },
+                        "status":  { "type": "string", "description": "New status (pending|in_progress|done|blocked|abandoned)." },
+                        "comment": { "type": "string", "description": "Optional comment on the new status." },
+                        "author":  { "type": "string", "description": "Comment author (default 'claude')." }
+                    },
+                    "required": ["id", "status"]
+                }
+            },
+            {
+                "name": "worklog_comment",
+                "description": "Attach a :Comment to the latest :Status of a worklog item (each status can carry many comments). Use this to record thoughts that arrive AFTER the status transition was made.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id":     { "type": "string", "description": "Worklog item id." },
+                        "body":   { "type": "string", "description": "Comment body (Markdown allowed)." },
+                        "author": { "type": "string", "description": "Author (default 'claude')." }
+                    },
+                    "required": ["id", "body"]
+                }
+            },
+            {
+                "name": "worklog_list",
+                "description": "List :WorklogItem nodes as a Markdown table. Optional filters: `area`, `status`. Sorted by latest status timestamp.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "area":   { "type": "string", "description": "Filter by area." },
+                        "status": { "type": "string", "description": "Filter by current_status." },
+                        "limit":  { "type": "integer", "description": "Max items (default 100)." }
+                    }
+                }
+            },
+            {
+                "name": "worklog_md",
+                "description": "Render a full dossier for one :WorklogItem: metadata, related nodes, and the chronological :Status timeline with all :Comment nodes nested under each status.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "description": "Worklog item id." }
+                    },
+                    "required": ["id"]
+                }
+            },
+            {
                 "name": "impact",
                 "description": "Compute the transitive blast radius of a node. Walks `CALLS` outwards (callees) and inwards (callers) up to `depth`, and one-hop for `MENTIONS` (docs) and `IMPLEMENTED_BY` (scenarios). Returns a Markdown report with counts per category and the top-N affected nodes. Use this before refactoring or deleting a function to see who is affected.",
                 "inputSchema": {
@@ -656,6 +729,7 @@ codegraph-mcp — MCP server exposing a velr-backed graph database to LLM agents
 USAGE:
     codegraph-mcp --db <path> [--watch <workspace>]
     codegraph-mcp <path>
+    codegraph-mcp report --db <path> --out <dir>
 
 The MCP server reads JSON-RPC requests on stdin and writes responses on
 stdout. With --watch, a background thread re-runs the indexer whenever
@@ -663,10 +737,15 @@ files in <workspace> change (debounced 500ms). The indexer's standard
 incremental path is used; uncommitted edits are not picked up until they
 are committed. See docs/mcp-tools.md.
 
+The `report` subcommand renders the graph-stored worklog
+(:WorklogItem / :Status / :Comment) into <dir>/ROADMAP.md and
+<dir>/WORKLOG.md.
+
 OPTIONS:
     --db <path>          velr database file
     --watch <workspace>  Re-run the indexer on file changes in <workspace>
     --debounce-ms <ms>   Watcher debounce window (default 500)
+    --out <dir>          (report) destination directory for the generated docs
     -h, --help           Show this help and exit
     -V, --version        Print version and exit
 ";
@@ -687,6 +766,20 @@ fn main() {
             .find(|(f, _)| f.as_str() == name)
             .map(|(_, v)| v.clone())
     };
+    if args.iter().skip(1).any(|a| a == "report") {
+        let db_path = arg_value("--db").unwrap_or_else(|| {
+            eprintln!("report: missing --db <path>");
+            std::process::exit(2);
+        });
+        let out_dir = arg_value("--out").unwrap_or_else(|| "docs".to_string());
+        match report::run(&db_path, &out_dir) {
+            Ok(()) => return,
+            Err(e) => {
+                eprintln!("report failed: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
     let db_path = arg_value("--db")
         .or_else(|| args.iter().skip(1).find(|a| !a.starts_with("--")).cloned())
         .unwrap_or_else(|| {
@@ -782,6 +875,11 @@ fn main() {
                     "watch" => handle_watch(&db, params),
                     "unwatch" => handle_unwatch(&db, params),
                     "list_watches" => handle_list_watches(&db),
+                    "worklog_create" => handle_worklog_create(&db, params),
+                    "worklog_set_status" => handle_worklog_set_status(&db, params),
+                    "worklog_comment" => handle_worklog_comment(&db, params),
+                    "worklog_list" => handle_worklog_list(&db, params),
+                    "worklog_md" => handle_worklog_md(&db, params),
                     other => err_text(format!("unknown tool: {other}")),
                 };
                 response(&req.id, content)
@@ -842,6 +940,11 @@ mod tests {
             "watch",
             "unwatch",
             "list_watches",
+            "worklog_create",
+            "worklog_set_status",
+            "worklog_comment",
+            "worklog_list",
+            "worklog_md",
         ] {
             assert!(names.contains(&expected), "missing tool: {expected}");
         }

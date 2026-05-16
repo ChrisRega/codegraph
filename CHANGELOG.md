@@ -8,6 +8,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Graph-backed worklog.** New `:WorklogItem`, `:Status`, `:Comment`
+  node labels store an append-only project worklog inside the graph
+  itself. `:Status` is append-only (one node per transition); each
+  `:Status` can carry many `:Comment` nodes (1:n). MCP tools:
+  `worklog_create`, `worklog_set_status`, `worklog_comment`,
+  `worklog_list`, `worklog_md`. New CLI subcommand
+  `codegraph-mcp report --db <p> --out <dir>` renders `ROADMAP.md` and
+  `WORKLOG.md` from the graph. Worklog nodes are in the wipe-protected
+  set, so they survive `--full` reindex like `:Note` / `:Concept` /
+  `:View`.
 - **Per-pass `[:CALLS]` scoping (bug fix).** `index_files_via_lsp`
   used to wipe *every* `[:CALLS]` edge in the graph before rebuilding
   for the changed-file set. In incremental and live mode that meant a

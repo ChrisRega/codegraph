@@ -67,8 +67,9 @@ the points below are repo-specific *additions*, not a replacement.
 - The mcp crate's per-tool handlers live in `crates/codegraph-mcp/src/`
   as sibling modules (`concepts.rs`, `coverage.rs`, `diff.rs`,
   `explore.rs`, `find.rs`, `history.rs`, `impact.rs`, `notes.rs`,
-  `pr_notes.rs`, `views.rs`, `watch_tools.rs`). When adding a new
-  tool, create a new sibling module rather than growing `main.rs`.
+  `pr_notes.rs`, `report.rs`, `views.rs`, `watch_tools.rs`,
+  `worklog.rs`). When adding a new tool, create a new sibling module
+  rather than growing `main.rs`.
 - `main.rs` should stay <2000 LoC; if it grows past that, extract
   another module.
 - Tests for handlers currently live in `main.rs::mod tests` for
