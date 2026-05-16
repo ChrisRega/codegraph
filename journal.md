@@ -1,5 +1,87 @@
 # codegraph build journal
 
+## Round 6 — skill-doc refresh + dogfood-discovered note orphaning bug
+
+### Skill files updated
+
+User asked me to refresh `CLAUDE.md` and
+`examples/claude-skill/codegraph.md` so I don't forget the current
+tool surface. Both were last touched mid-H-series and missed:
+
+- Every K-series tool (`coverage_md`, `explore`, `define_concept` /
+  `concept` / `list_concepts`, `save_view` / `view` / `list_views`,
+  `import_pr_notes`, `watch` / `unwatch` / `list_watches`,
+  `diff_since`, `index_status`, `find_symbol`, `impact`).
+- The `--watch` live-mode + `index_status` discipline.
+- The full list of velr 0.2.x planner gotchas: no `EXISTS { MATCH }`
+  subqueries, `OR` → `UNION` clashes with `LIMIT`/`SET`, label
+  predicate + existential predicate doesn't compose, no `$param`,
+  `IN [...]` past ~100 entries OOMs combined with writes, no
+  variable-length paths.
+- The persistent LSP pool + `wait_until_idle` story.
+- Quick recipes updated — the old "find dead code" recipe used
+  `WHERE NOT EXISTS { MATCH ... }` which velr can't parse; replaced
+  with a `coverage_md` call (which IS the supported way).
+
+`CLAUDE.md` now points at the skill file as authoritative and adds
+only repo-local conventions (Cypher escaping discipline, indexer
+phase ordering, per-tool module layout, watcher etiquette).
+
+### Dogfood discovery: live-mode reindex orphans `[:NOTES]` edges
+
+While writing the skill update I tried to attach a `:Note` to
+`phase_test_tagging`. Sequence:
+
+1. `find_symbol("phase_test_tagging")` → 1 hit, qn known.
+2. `write_note(match=..., ...)` → "attached to 1 target", success.
+3. Tried `node_md(label, key, value)` to verify it surfaced under
+   the function.
+4. Got "Not found" — `:Function` not found at all, never mind the
+   note.
+
+Diagnosis: my earlier file save had triggered the watcher, which
+was mid-pass on `lib.rs`. Live mode does
+`MATCH (f:File {path: ...})<-[:DEFINED_IN]-(n) DETACH DELETE n` —
+which removes the old `:Function` AND the `[:NOTES]` edge I just
+created. The `:Note` node survives (`MATCH (n:Note) RETURN count(n)`
+returned 3) but it's now orphaned. By the time I re-ran `node_md`,
+the function was back but the note's edge was gone.
+
+So the "notes survive `--full` reindex" promise that the original
+G2 design made holds true for `--full`, but **not for live-mode
+single-file reindex.** That's a real gap.
+
+Filed:
+- Updated the skill file with a ⚠️ in operating rule #7 explaining
+  the limitation + workaround (attach notes to `:File`/`:Package`
+  instead of `:Function` when you want durability across saves).
+- Tightened operating rule #2 (wait for `state: idle`) — the race
+  is real and bites.
+- Wrote a `:Note` ON `crates/codegraph-mcp/src/notes.rs` documenting
+  the bug and the fix sketch, so anyone touching the notes layer
+  surfaces it via `node_md`.
+
+### How the MCP tools actually felt this round
+
+Mostly excellent. Specific moments:
+
+- `find_symbol` → `write_note` → expected verification via `node_md`
+  is a clean three-step loop. The race bug only surfaced because
+  `index_status` was honest about being mid-pass, which immediately
+  pointed me at the right hypothesis (mid-pass detach).
+- `schema` only listed 12 vertex labels even though I knew several
+  conditional ones (`:Note`, `:View`, `:Concept`, etc.) could
+  appear. Discovered while writing the skill file that `schema`
+  samples the actual data — labels not currently in the graph
+  don't show up. Worth documenting in the skill file under "Schema
+  (full design surface)" as a separate section so the agent knows
+  what *can* appear vs what currently is.
+- `cypher_md` smoke-test pattern got reinforced when I tried
+  `RETURN substring(f.body, 0, 60)` and velr said "Unknown function
+  in RETURN: substring". One smoke call, planner-error visible
+  immediately. Skill file says "use cypher_md as a smoke test" —
+  paid off again.
+
 ## Round 5 — cleanup after runaway, workDoneProgress wait
 
 ### Cleanup
