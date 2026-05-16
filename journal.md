@@ -1,5 +1,47 @@
 # codegraph build journal
 
+## Round 9 — fix K9 + K10, with a velr bug surfaced in the process
+
+User said "Fix k9 und k10". Surface-level both looked like missing
+wipes. Reality was deeper for K9.
+
+### K10 — markdown re-wipe per file (straightforward)
+
+Added a per-file `DETACH DELETE` keyed on `qualified_name` and the
+`{rel}#` section prefix in `markdown_index::index_markdown_files`,
+running before `write_doc_node` / `write_section_node`. Fresh `--full`
+of this repo: 16 :Doc / 175 :DocSection (was 6024/6024 after ~40 live
+saves).
+
+### K9 — the wipe AND the rebuild were both wrong
+
+Initial belief: just MERGE the `[:TESTS]` edge so re-runs are
+idempotent. Wrote that. Then strengthened the test: seed 2 upstream
+`:CALLS` between the same `(test, target)` pair, run Phase 6 three
+times, expect 1 `[:TESTS]`. **Saw 12.**
+
+Empirical: velr 0.2.16's `MERGE (t)-[:TESTS]->(f)` does NOT deduplicate
+equivalent (start, end, type) relationship triples. A single matching
+row produced multiple physical edges. The earlier wipe
+`MATCH ()-[r:TESTS]->() DELETE r` was *also* silently no-oping (velr
+needs anchored variables on both endpoints to bind for delete).
+
+Fix: anchor the wipe (`MATCH (a)-[r:TESTS]->(b) DELETE r`), then
+replace MERGE with explicit client-side `HashSet<(t, f)>` dedup +
+`CREATE`. Documented inline so the next maintainer doesn't
+"simplify" back to MERGE.
+
+Verified on fresh `--full`: 0 (a, b) pairs with >1 `:TESTS`, total
+edges down from 6204 → 336 (real coverage).
+
+### Lesson for me
+
+The trivial test (1 CALLS → 1 TESTS) passed even with broken MERGE
+semantics because there was only ever one matching row. The bug
+surfaced only when the test seeded the *exact shape* the production
+data produces — duplicate upstream rows feeding the MERGE. "Trivially
+green" tests are not contracts; tests that mimic the failure mode are.
+
 ## Round 8 — Phase 8 working-tree overlay + dogfood-found CG bugs
 
 User asked for the save-time `:GitCommit` overlay so `diff_since`
