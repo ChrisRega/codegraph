@@ -128,6 +128,20 @@ impl LspClient {
         method: &str,
         params: P,
     ) -> Result<R, String> {
+        let id = self.send_request(method, params)?;
+        self.await_response(id, method)
+    }
+
+    /// Send a JSON-RPC request without waiting — returns the request id
+    /// so the caller can collect the response later via `await_response`.
+    /// Use with `await_response` to pipeline many requests in parallel,
+    /// turning N sequential round-trips into 1 batched send + 1 batched
+    /// receive.
+    pub fn send_request<P: serde::Serialize>(
+        &mut self,
+        method: &str,
+        params: P,
+    ) -> Result<i64, String> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let msg = json!({
             "jsonrpc": "2.0",
@@ -135,14 +149,21 @@ impl LspClient {
             "method": method,
             "params": params,
         });
-
         self.send_message(&msg)?;
-        let response = self.read_response(id)?;
+        Ok(id)
+    }
 
+    /// Wait for the response to a previously-sent `send_request` and
+    /// deserialize it into `R`. `method` is used only for error messages.
+    pub fn await_response<R: serde::de::DeserializeOwned>(
+        &mut self,
+        id: i64,
+        method: &str,
+    ) -> Result<R, String> {
+        let response = self.read_response(id)?;
         if let Some(error) = response.get("error") {
             return Err(format!("LSP error: {}", error));
         }
-
         let result = response.get("result").cloned().unwrap_or(Value::Null);
         serde_json::from_value(result)
             .map_err(|e| format!("Failed to deserialize {method} response: {e}"))
@@ -307,6 +328,113 @@ impl LspClient {
         }
     }
 
+    /// Batched outgoing-calls lookup. Pipelines `prepareCallHierarchy`
+    /// followed by `callHierarchy/outgoingCalls` in chunks of up to
+    /// `MAX_INFLIGHT` requests so we cap rust-analyzer's concurrent
+    /// queue but still hide most of the per-request round-trip
+    /// latency.
+    ///
+    /// `positions` is `(abs_path, line, character)`. The returned vec
+    /// preserves input order; entries where the prepare call failed,
+    /// returned no items, or the subsequent outgoingCalls failed,
+    /// become an empty `Vec`.
+    pub fn outgoing_calls_batch(
+        &mut self,
+        positions: &[(std::path::PathBuf, u32, u32)],
+    ) -> Vec<Vec<CallHierarchyOutgoingCall>> {
+        // Cap concurrent in-flight requests. Firing 285 prepareCallHierarchy
+        // at rust-analyzer in one burst empirically caused ~70% of CALLS to
+        // come back missing. 32 keeps the pipelining win without overrunning
+        // RA's internal request queue.
+        const MAX_INFLIGHT: usize = 32;
+        let mut out: Vec<Vec<CallHierarchyOutgoingCall>> = Vec::with_capacity(positions.len());
+        for chunk in positions.chunks(MAX_INFLIGHT) {
+            out.extend(self.outgoing_calls_chunk(chunk));
+        }
+        out
+    }
+
+    fn outgoing_calls_chunk(
+        &mut self,
+        positions: &[(std::path::PathBuf, u32, u32)],
+    ) -> Vec<Vec<CallHierarchyOutgoingCall>> {
+        if positions.is_empty() {
+            return Vec::new();
+        }
+        // Phase 1: send every prepareCallHierarchy request, collect the
+        // ids in input order.
+        let mut prep_ids: Vec<Option<i64>> = Vec::with_capacity(positions.len());
+        for (path, line, character) in positions {
+            let uri = match file_uri(path) {
+                Ok(u) => u,
+                Err(_) => {
+                    prep_ids.push(None);
+                    continue;
+                }
+            };
+            let id = self.send_request(
+                "textDocument/prepareCallHierarchy",
+                CallHierarchyPrepareParams {
+                    text_document_position_params: TextDocumentPositionParams {
+                        text_document: TextDocumentIdentifier { uri },
+                        position: Position {
+                            line: *line,
+                            character: *character,
+                        },
+                    },
+                    work_done_progress_params: Default::default(),
+                },
+            );
+            prep_ids.push(id.ok());
+        }
+        // Phase 2: collect prepare responses + send outgoingCalls for each.
+        let mut call_ids: Vec<Option<i64>> = Vec::with_capacity(positions.len());
+        for prep_id in prep_ids {
+            let Some(id) = prep_id else {
+                call_ids.push(None);
+                continue;
+            };
+            let items: Option<Vec<CallHierarchyItem>> =
+                match self.await_response(id, "textDocument/prepareCallHierarchy") {
+                    Ok(v) => v,
+                    Err(_) => {
+                        call_ids.push(None);
+                        continue;
+                    }
+                };
+            let item = match items.and_then(|v| v.into_iter().next()) {
+                Some(it) => it,
+                None => {
+                    call_ids.push(None);
+                    continue;
+                }
+            };
+            let id = self.send_request(
+                "callHierarchy/outgoingCalls",
+                CallHierarchyOutgoingCallsParams {
+                    item,
+                    work_done_progress_params: Default::default(),
+                    partial_result_params: Default::default(),
+                },
+            );
+            call_ids.push(id.ok());
+        }
+        // Phase 3: collect outgoingCalls responses.
+        call_ids
+            .into_iter()
+            .map(|id| match id {
+                Some(id) => match self.await_response::<Option<Vec<CallHierarchyOutgoingCall>>>(
+                    id,
+                    "callHierarchy/outgoingCalls",
+                ) {
+                    Ok(Some(v)) => v,
+                    _ => Vec::new(),
+                },
+                None => Vec::new(),
+            })
+            .collect()
+    }
+
     /// Get outgoing calls from a function at a specific position.
     pub fn outgoing_calls(
         &mut self,
@@ -413,31 +541,48 @@ impl LspClient {
             return Ok(resp);
         }
 
-        // Read messages from the background thread until we find our response
+        // Read messages from the background thread until we find our response.
         loop {
             let msg = self
                 .receiver
                 .recv()
                 .map_err(|_| "LSP reader thread closed".to_string())?;
 
-            if let Some(id) = msg.get("id").and_then(|v| v.as_i64()) {
-                if id == expected_id {
-                    return Ok(msg);
+            // Three message shapes per JSON-RPC 2.0:
+            //   - response:        has `id`, no `method`        → match against expected, cache otherwise
+            //   - server request:  has `id` AND `method`        → MUST reply with `result: null`
+            //                                                     or rust-analyzer stalls
+            //   - notification:    has `method`, no `id`        → drop on the floor
+            let has_method = msg.get("method").is_some();
+            let id_i64 = msg.get("id").and_then(|v| v.as_i64());
+            match (id_i64, has_method) {
+                (Some(id), false) => {
+                    // Response.
+                    if id == expected_id {
+                        return Ok(msg);
+                    }
+                    self.pending.insert(id, msg);
                 }
-                // Cache response for a different request
-                self.pending.insert(id, msg);
-            } else {
-                // Notification — respond to server-initiated requests
-                if let Some(method) = msg.get("method").and_then(|v| v.as_str()) {
-                    eprintln!("  [lsp] {method}");
-                    // RA sends window/workDoneProgress/create as a request that needs a response
-                    if msg.get("id").is_some() {
-                        let reply = json!({
-                            "jsonrpc": "2.0",
-                            "id": msg["id"],
-                            "result": null
-                        });
-                        let _ = self.send_message(&reply);
+                (Some(_), true) => {
+                    // Server-initiated request — e.g. window/workDoneProgress/create.
+                    // Replying with null is the LSP-conformant ack: we accept the
+                    // token / sample / etc. but don't pretend to do anything with it.
+                    // Without this reply rust-analyzer stalls progress trackers and
+                    // (worse) starts returning empty results for client requests
+                    // that ride on the same progress token. Discovered while
+                    // pipelining 285 outgoingCalls in parallel: 64% of CALLS edges
+                    // went missing until this reply landed.
+                    let reply = json!({
+                        "jsonrpc": "2.0",
+                        "id": msg["id"],
+                        "result": null,
+                    });
+                    let _ = self.send_message(&reply);
+                }
+                (None, _) => {
+                    // Notification: log and drop.
+                    if let Some(method) = msg.get("method").and_then(|v| v.as_str()) {
+                        eprintln!("  [lsp] {method}");
                     }
                 }
             }

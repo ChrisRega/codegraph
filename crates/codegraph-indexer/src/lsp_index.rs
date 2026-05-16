@@ -184,11 +184,17 @@ pub fn index_files_via_lsp(
         }
     }
 
+    // Two-pass strategy:
+    //   1) Snapshot-replay every fn whose body_hash matches the pre-wipe
+    //      snapshot — no LSP cost at all.
+    //   2) For the rest, batch all `outgoingCalls` requests in one
+    //      pipelined call so we pay ~2 LSP round-trip waits total
+    //      instead of 2N (was the dominant cost in big batches).
     let mut calls_skipped_via_hash = 0u32;
-    for (abs_path, line, character, caller_qn, body_hash) in &fn_positions {
-        // Body-hash skip: if this fn's body is byte-identical to its
-        // pre-wipe snapshot, its outgoing CALLS are guaranteed identical
-        // too. Re-attach from snapshot, no LSP round-trip.
+    type FnEntry = (PathBuf, u32, u32, String, i64);
+    let mut needs_lsp: Vec<&FnEntry> = Vec::new();
+    for entry in fn_positions.iter() {
+        let (_, _, _, caller_qn, body_hash) = entry;
         if let Some((old_hash, old_callees)) = calls_snapshot.get(caller_qn) {
             if *old_hash == *body_hash {
                 let mut seen = HashSet::new();
@@ -210,33 +216,41 @@ pub fn index_files_via_lsp(
                 continue;
             }
         }
-
-        let calls = match lsp.outgoing_calls(abs_path, *line, *character) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-
-        let mut seen = HashSet::new();
-        for call in &calls {
-            let callee_name = &call.to.name;
-            if !seen.insert(callee_name.clone()) {
-                continue;
-            }
-            run(
-                db,
-                &format!(
-                    "MATCH (a:Function {{qualified_name: {caller}}}), (b:Function {{name: {callee}}}) CREATE (a)-[:CALLS]->(b)",
-                    caller = escape_str(caller_qn),
-                    callee = escape_str(callee_name),
-                ),
-            );
-            total_calls += 1;
-        }
+        needs_lsp.push(entry);
     }
     if calls_skipped_via_hash > 0 {
         eprintln!(
             "  [=] Skipped outgoingCalls for {calls_skipped_via_hash} fn(s) with unchanged body_hash"
         );
+    }
+    if !needs_lsp.is_empty() {
+        let positions: Vec<(PathBuf, u32, u32)> = needs_lsp
+            .iter()
+            .map(|(abs, line, character, _, _)| (abs.clone(), *line, *character))
+            .collect();
+        eprintln!(
+            "  [*] Pipelining outgoingCalls for {} fn(s) via batched LSP requests",
+            positions.len()
+        );
+        let batched = lsp.outgoing_calls_batch(&positions);
+        for ((_, _, _, caller_qn, _), calls) in needs_lsp.into_iter().zip(batched) {
+            let mut seen = HashSet::new();
+            for call in &calls {
+                let callee_name = &call.to.name;
+                if !seen.insert(callee_name.clone()) {
+                    continue;
+                }
+                run(
+                    db,
+                    &format!(
+                        "MATCH (a:Function {{qualified_name: {caller}}}), (b:Function {{name: {callee}}}) CREATE (a)-[:CALLS]->(b)",
+                        caller = escape_str(caller_qn),
+                        callee = escape_str(callee_name),
+                    ),
+                );
+                total_calls += 1;
+            }
+        }
     }
 
     (total_symbols, total_functions, total_calls)
