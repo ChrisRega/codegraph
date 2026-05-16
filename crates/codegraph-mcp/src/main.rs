@@ -992,6 +992,31 @@ mod tests {
         assert!(md.contains("`abcd1234`"), "{md}");
         assert!(md.contains("src/lib.rs"));
         assert!(md.contains("README.md"));
+        // Events line always present (even at zero) so the agent learns the
+        // counter exists and starts checking it.
+        assert!(md.contains("**Events:** 0 total, 0 pending"), "{md}");
+    }
+
+    /// Verify the new "pending events queued behind a running pass"
+    /// visibility surface — answers the user complaint that fast editing
+    /// doesn't show as activity.
+    #[test]
+    fn index_status_surfaces_pending_events_during_running_pass() {
+        let status = new_shared_status();
+        if let Ok(mut s) = status.lock() {
+            s.state = "running".to_string();
+            s.events_total = 47;
+            s.events_pending = 12;
+            s.pending_paths = vec![
+                "crates/codegraph-mcp/src/main.rs".into(),
+                "crates/codegraph-indexer/src/lib.rs".into(),
+            ];
+        }
+        let md = text_of(&handle_index_status(&status, Some("/tmp/ws")));
+        assert!(md.contains("`running`"), "{md}");
+        assert!(md.contains("47 total, 12 pending"), "{md}");
+        assert!(md.contains("Pending paths"), "{md}");
+        assert!(md.contains("crates/codegraph-mcp/src/main.rs"), "{md}");
     }
 
     #[test]

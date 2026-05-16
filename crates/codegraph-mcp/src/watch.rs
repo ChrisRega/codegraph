@@ -88,6 +88,22 @@ pub struct IndexStatus {
     pub head_hash: String,
     /// Names of LSP commands currently held alive by the pool.
     pub live_lsps: Vec<String>,
+    /// Total indexable file-change events accepted by the watcher
+    /// since the server started. Increments live as events arrive,
+    /// independent of pass boundaries — when `state` is `running` and
+    /// this number is going up, the watcher is *receiving* edits even
+    /// if the current pass hasn't finished yet.
+    pub events_total: u64,
+    /// Indexable file-change events received since the most recent
+    /// completed pass. When `state` is `running` and this number is
+    /// high, edits are stacking up behind the current pass and will
+    /// land in the next batch. When `state` is `idle` and this is
+    /// zero, the graph is fully caught up.
+    pub events_pending: u64,
+    /// Workspace-relative paths from events received since the most
+    /// recent completed pass, capped. Confirms which files are queued
+    /// while a pass is in flight.
+    pub pending_paths: Vec<String>,
 }
 
 pub type SharedStatus = std::sync::Arc<std::sync::Mutex<IndexStatus>>;
@@ -144,9 +160,22 @@ pub fn handle_index_status(status: &SharedStatus, watch_path: Option<&str>) -> V
                     snap.live_lsps.join("`, `")
                 ));
             }
+            out.push_str(&format!(
+                "- **Events:** {} total, {} pending behind current/last batch\n",
+                snap.events_total, snap.events_pending,
+            ));
             if !snap.last_paths.is_empty() {
                 out.push_str("\n**Last batch paths**\n\n");
                 for p in &snap.last_paths {
+                    out.push_str(&format!("- `{p}`\n"));
+                }
+            }
+            if !snap.pending_paths.is_empty() {
+                out.push_str(&format!(
+                    "\n**Pending paths ({}, queued since last batch)**\n\n",
+                    snap.pending_paths.len()
+                ));
+                for p in &snap.pending_paths {
                     out.push_str(&format!("- `{p}`\n"));
                 }
             }
@@ -202,8 +231,34 @@ pub fn spawn_indexer_watcher(
             debounce_ms
         );
 
+        // Wrap the mpsc sender in an EventHandler that updates the live
+        // `events_total` / `events_pending` / `pending_paths` counters as
+        // events arrive — *before* the main loop blocks on recv. This is
+        // what gives the agent visibility while a pass is in flight: the
+        // counters tick up in real time, so `index_status` shows "10 events
+        // pending behind running pass" instead of looking stuck.
         let (tx, rx) = channel::<notify::Result<notify::Event>>();
-        let mut watcher = match notify::recommended_watcher(tx) {
+        let counter_status = status.clone();
+        let counter_ws = canonical.clone();
+        let event_handler = move |ev_res: notify::Result<notify::Event>| {
+            if let Ok(ev) = &ev_res {
+                for p in &ev.paths {
+                    if is_indexable_event_path(p) {
+                        if let Ok(mut s) = counter_status.lock() {
+                            s.events_total = s.events_total.saturating_add(1);
+                            s.events_pending = s.events_pending.saturating_add(1);
+                            if s.pending_paths.len() < 50 {
+                                if let Ok(rel) = p.strip_prefix(&counter_ws) {
+                                    s.pending_paths.push(rel.to_string_lossy().into_owned());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            let _ = tx.send(ev_res);
+        };
+        let mut watcher = match notify::recommended_watcher(event_handler) {
             Ok(w) => w,
             Err(e) => {
                 eprintln!("[watch] could not create watcher: {e}");
@@ -271,6 +326,12 @@ pub fn spawn_indexer_watcher(
             if let Ok(mut s) = status.lock() {
                 s.state = "running".to_string();
                 s.last_paths = rel_paths.iter().take(20).cloned().collect();
+                // Snapshot consumed: reset the per-pass queue counters.
+                // Anything that arrives DURING this pass will tick them up
+                // again (via the EventHandler in the notify thread),
+                // surfacing as "queued for next pass" in `index_status`.
+                s.events_pending = 0;
+                s.pending_paths.clear();
             }
             let started = Instant::now();
             let opts = codegraph_indexer::IndexOptions::new(canonical.clone(), &db_path)
