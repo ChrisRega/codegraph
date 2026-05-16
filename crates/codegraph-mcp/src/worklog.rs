@@ -24,6 +24,7 @@ use serde_json::Value;
 use crate::util::{chrono_now_iso, err_text, ok_text, safe_name_with_dashes};
 
 const ALLOWED_STATUS: &[&str] = &["pending", "in_progress", "done", "blocked", "abandoned"];
+const ALLOWED_KIND: &[&str] = &["bug", "feature", "task", "refactor", "perf", "docs"];
 
 fn validate_status(s: &str) -> Result<(), String> {
     if ALLOWED_STATUS.contains(&s) {
@@ -32,6 +33,17 @@ fn validate_status(s: &str) -> Result<(), String> {
         Err(format!(
             "invalid status `{s}`; expected one of: {}",
             ALLOWED_STATUS.join(", ")
+        ))
+    }
+}
+
+fn validate_kind(k: &str) -> Result<(), String> {
+    if ALLOWED_KIND.contains(&k) {
+        Ok(())
+    } else {
+        Err(format!(
+            "invalid kind `{k}`; expected one of: {}",
+            ALLOWED_KIND.join(", ")
         ))
     }
 }
@@ -94,6 +106,14 @@ pub fn handle_worklog_create(db: &Db, params: &Value) -> Value {
     if let Err(e) = validate_status(&status) {
         return err_text(e);
     }
+    let kind = params
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("task")
+        .to_string();
+    if let Err(e) = validate_kind(&kind) {
+        return err_text(e);
+    }
     let comment = params
         .get("comment")
         .and_then(|v| v.as_str())
@@ -139,11 +159,12 @@ pub fn handle_worklog_create(db: &Db, params: &Value) -> Value {
 
     // CREATE item.
     let q = format!(
-        "CREATE (w:WorklogItem {{id: {id}, title: {title}, area: {area}, \
+        "CREATE (w:WorklogItem {{id: {id}, title: {title}, area: {area}, kind: {kind}, \
          created_at: {now}, current_status: {status}, current_status_at: {now}}})",
         id = escape_str(&id),
         title = escape_str(&title),
         area = escape_str(&area),
+        kind = escape_str(&kind),
         now = escape_str(&now),
         status = escape_str(&status),
     );
@@ -202,7 +223,7 @@ pub fn handle_worklog_create(db: &Db, params: &Value) -> Value {
     }
 
     ok_text(format!(
-        "created worklog `{id}` (status `{status}`{rel})",
+        "created worklog `{id}` (kind `{kind}`, status `{status}`{rel})",
         rel = if related > 0 {
             format!(
                 ", {related} related node{}",
@@ -367,8 +388,18 @@ pub fn handle_worklog_list(db: &Db, params: &Value) -> Value {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    let kind_filter = params
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     if !status_filter.is_empty() {
         if let Err(e) = validate_status(&status_filter) {
+            return err_text(e);
+        }
+    }
+    if !kind_filter.is_empty() {
+        if let Err(e) = validate_kind(&kind_filter) {
             return err_text(e);
         }
     }
@@ -380,6 +411,9 @@ pub fn handle_worklog_list(db: &Db, params: &Value) -> Value {
     if !status_filter.is_empty() {
         wheres.push(format!("w.current_status = {}", escape_str(&status_filter)));
     }
+    if !kind_filter.is_empty() {
+        wheres.push(format!("w.kind = {}", escape_str(&kind_filter)));
+    }
     let where_sql = if wheres.is_empty() {
         String::new()
     } else {
@@ -388,7 +422,7 @@ pub fn handle_worklog_list(db: &Db, params: &Value) -> Value {
 
     let q = format!(
         "MATCH (w:WorklogItem){where_sql} \
-         RETURN w.id AS id, w.title AS title, w.area AS area, \
+         RETURN w.id AS id, w.title AS title, w.area AS area, w.kind AS kind, \
                 w.current_status AS status, w.current_status_at AS status_at, \
                 w.created_at AS created_at \
          ORDER BY w.current_status_at DESC LIMIT {limit}"
@@ -402,16 +436,17 @@ pub fn handle_worklog_list(db: &Db, params: &Value) -> Value {
     }
     let mut out = String::new();
     out.push_str(&format!("# Worklog ({} items)\n\n", t.rows.len()));
-    out.push_str("| status | id | title | area | updated |\n");
-    out.push_str("|--------|----|-------|------|---------|\n");
+    out.push_str("| status | kind | id | title | area | updated |\n");
+    out.push_str("|--------|------|----|-------|------|---------|\n");
     for row in &t.rows {
         let id = row.first().and_then(|c| c.as_str()).unwrap_or("");
         let title = row.get(1).and_then(|c| c.as_str()).unwrap_or("");
         let area = row.get(2).and_then(|c| c.as_str()).unwrap_or("");
-        let status = row.get(3).and_then(|c| c.as_str()).unwrap_or("");
-        let at = row.get(4).and_then(|c| c.as_str()).unwrap_or("");
+        let kind = row.get(3).and_then(|c| c.as_str()).unwrap_or("");
+        let status = row.get(4).and_then(|c| c.as_str()).unwrap_or("");
+        let at = row.get(5).and_then(|c| c.as_str()).unwrap_or("");
         out.push_str(&format!(
-            "| `{status}` | `{id}` | {title} | {area} | {at} |\n"
+            "| `{status}` | `{kind}` | `{id}` | {title} | {area} | {at} |\n"
         ));
     }
     ok_text(out.trim_end().to_string())
@@ -425,7 +460,8 @@ pub fn handle_worklog_md(db: &Db, params: &Value) -> Value {
 
     let item_q = format!(
         "MATCH (w:WorklogItem {{id: {}}}) \
-         RETURN w.title AS title, w.area AS area, w.created_at AS created_at, \
+         RETURN w.title AS title, w.area AS area, w.kind AS kind, \
+                w.created_at AS created_at, \
                 w.current_status AS status, w.current_status_at AS status_at",
         escape_str(&id)
     );
@@ -447,18 +483,23 @@ pub fn handle_worklog_md(db: &Db, params: &Value) -> Value {
         .and_then(|c| c.as_str())
         .unwrap_or("")
         .to_string();
-    let created_at = row
+    let kind = row
         .get(2)
         .and_then(|c| c.as_str())
         .unwrap_or("")
         .to_string();
-    let status = row
+    let created_at = row
         .get(3)
         .and_then(|c| c.as_str())
         .unwrap_or("")
         .to_string();
-    let status_at = row
+    let status = row
         .get(4)
+        .and_then(|c| c.as_str())
+        .unwrap_or("")
+        .to_string();
+    let status_at = row
+        .get(5)
         .and_then(|c| c.as_str())
         .unwrap_or("")
         .to_string();
@@ -466,6 +507,9 @@ pub fn handle_worklog_md(db: &Db, params: &Value) -> Value {
     let mut out = String::new();
     out.push_str(&format!("# {title}\n\n"));
     out.push_str(&format!("- **id**: `{id}`\n"));
+    if !kind.is_empty() {
+        out.push_str(&format!("- **kind**: `{kind}`\n"));
+    }
     if !area.is_empty() {
         out.push_str(&format!("- **area**: {area}\n"));
     }
@@ -649,6 +693,26 @@ mod tests {
         let r = handle_worklog_create(&db, &json!({"title": "X", "status": "weird"}));
         assert!(is_err(&r));
         assert!(text(&r).contains("invalid status"));
+    }
+
+    #[test]
+    fn kind_defaults_to_task_and_can_be_overridden_and_filtered() {
+        let db = db();
+        let r = handle_worklog_create(&db, &json!({"title": "default"}));
+        assert!(text(&r).contains("kind `task`"), "{}", text(&r));
+
+        handle_worklog_create(&db, &json!({"title": "a bug", "kind": "bug"}));
+        handle_worklog_create(&db, &json!({"title": "a feat", "kind": "feature"}));
+        handle_worklog_create(&db, &json!({"title": "a perf", "kind": "perf"}));
+
+        let bad = handle_worklog_create(&db, &json!({"title": "no", "kind": "weird"}));
+        assert!(is_err(&bad));
+        assert!(text(&bad).contains("invalid kind"));
+
+        let bugs = text(&handle_worklog_list(&db, &json!({"kind": "bug"})));
+        assert!(bugs.contains("1 items"), "{bugs}");
+        assert!(bugs.contains("a bug"), "{bugs}");
+        assert!(!bugs.contains("a feat"), "{bugs}");
     }
 
     #[test]

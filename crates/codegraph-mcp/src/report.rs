@@ -65,8 +65,9 @@ pub fn render_roadmap(db: &Db) -> String {
                 out.push_str(&format!("### {status}\n\n"));
                 for it in rows {
                     out.push_str(&format!(
-                        "- [{}] **{}** `({})` — _since {}_  \n  `{}`\n",
+                        "- [{}] {} **{}** `({})` — _since {}_  \n  `{}`\n",
                         checkbox(&it.status),
+                        kind_tag(&it.kind),
                         it.title,
                         it.status,
                         it.status_at,
@@ -94,7 +95,12 @@ pub fn render_worklog(db: &Db) -> String {
     items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
 
     for it in &items {
-        out.push_str(&format!("## {} {}\n", status_badge(&it.status), it.title));
+        out.push_str(&format!(
+            "## {} {} {}\n",
+            status_badge(&it.status),
+            kind_tag(&it.kind),
+            it.title
+        ));
         out.push_str(&format!(
             "_id `{}` · area `{}` · created {}_\n\n",
             it.id,
@@ -142,6 +148,14 @@ fn checkbox(status: &str) -> &'static str {
     }
 }
 
+fn kind_tag(kind: &str) -> String {
+    if kind.is_empty() {
+        String::new()
+    } else {
+        format!("`[{}]`", kind)
+    }
+}
+
 fn status_badge(status: &str) -> &'static str {
     match status {
         "done" => "[DONE]",
@@ -157,6 +171,7 @@ struct Item {
     id: String,
     title: String,
     area: String,
+    kind: String,
     status: String,
     status_at: String,
     created_at: String,
@@ -164,7 +179,7 @@ struct Item {
 
 fn fetch_items(db: &Db) -> Vec<Item> {
     let q = "MATCH (w:WorklogItem) \
-             RETURN w.id AS id, w.title AS title, w.area AS area, \
+             RETURN w.id AS id, w.title AS title, w.area AS area, w.kind AS kind, \
                     w.current_status AS status, w.current_status_at AS status_at, \
                     w.created_at AS created_at \
              ORDER BY w.current_status_at DESC";
@@ -178,9 +193,10 @@ fn fetch_items(db: &Db) -> Vec<Item> {
             id: r.first().and_then(|c| c.as_str()).unwrap_or("").to_string(),
             title: r.get(1).and_then(|c| c.as_str()).unwrap_or("").to_string(),
             area: r.get(2).and_then(|c| c.as_str()).unwrap_or("").to_string(),
-            status: r.get(3).and_then(|c| c.as_str()).unwrap_or("").to_string(),
-            status_at: r.get(4).and_then(|c| c.as_str()).unwrap_or("").to_string(),
-            created_at: r.get(5).and_then(|c| c.as_str()).unwrap_or("").to_string(),
+            kind: r.get(3).and_then(|c| c.as_str()).unwrap_or("").to_string(),
+            status: r.get(4).and_then(|c| c.as_str()).unwrap_or("").to_string(),
+            status_at: r.get(5).and_then(|c| c.as_str()).unwrap_or("").to_string(),
+            created_at: r.get(6).and_then(|c| c.as_str()).unwrap_or("").to_string(),
         })
         .collect()
 }

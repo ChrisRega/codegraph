@@ -43,10 +43,10 @@ Sorted by frequency you should reach for them in a typical session.
 | `save_view(name, cypher, description?)` / `view(name, params?)` / `list_views` | Persist + replay parameterised Cypher queries as `:View` nodes. Use for queries you find yourself running repeatedly. `$key` tokens in the saved cypher get substituted via `escape_str` at run time. |
 | `watch(label, key, value)` / `unwatch` / `list_watches` | Mark a node so the next indexer pass attaches a `:Note` tagged `watch-trigger` when its body changes. Cross-session async notifications. |
 | `import_pr_notes(comments, pr?)` | Bulk-import `gh pr view --json comments` output as `:Note`s on referenced `:Function`s. |
-| `worklog_create(title, area?, status?, comment?, author?, id?, match?)` | Create a `:WorklogItem` with an initial `:Status` (default `pending`). Optional first `:Comment` and `[:RELATES_TO]` edges to existing nodes (via Cypher MATCH binding `t`). Use this when starting any non-trivial work the user wants tracked across sessions. |
+| `worklog_create(title, area?, kind?, status?, comment?, author?, id?, match?)` | Create a `:WorklogItem` with an initial `:Status` (default `pending`). `kind` classifies the work: `bug` \| `feature` \| `task` \| `refactor` \| `perf` \| `docs` (default `task`) — mirrors Conventional-Commits prefixes. Optional first `:Comment` and `[:RELATES_TO]` edges (Cypher MATCH binding `t`). Use this when starting any non-trivial work the user wants tracked across sessions. |
 | `worklog_set_status(id, status, comment?, author?)` | Append a new `:Status` to an existing item (status is append-only — never destructive). Allowed: `pending`, `in_progress`, `done`, `blocked`, `abandoned`. Attach a comment that summarises why the transition happened. |
 | `worklog_comment(id, body, author?)` | Attach a `:Comment` to the **latest** `:Status` of an item. Use this for thoughts that arrive AFTER the transition — retros, follow-up findings, lessons learned. |
-| `worklog_list(area?, status?, limit?)` | Markdown table of items, optionally filtered by area / current_status. Sorted by latest status timestamp. **Recall first** — check what's already in flight before starting parallel work. |
+| `worklog_list(area?, status?, kind?, limit?)` | Markdown table of items, optionally filtered by area / current_status / kind. Sorted by latest status timestamp. **Recall first** — check what's already in flight before starting parallel work. Common patterns: `worklog_list(kind="bug", status="done")` for recent fix retros (PR-prep gold), `worklog_list(status="in_progress")` for pickup. |
 | `worklog_md(id)` | Full dossier for one item: metadata, related nodes, the chronological `:Status` timeline, and all `:Comment` threads nested under each status. |
 
 ### Transactional writes (escape hatch)
@@ -187,9 +187,12 @@ These bit me while building the tools — bake them into your queries:
     record of "what's open, what shipped, how did it go" across
     sessions and projects. The pattern:
 
-    - **At task start:** `worklog_create(title, area, status="in_progress",
-      comment="why this matters / what's the plan", match=<optional
-      Cypher binding `t` to the code nodes this touches>)`. The
+    - **At task start:** `worklog_create(title, area, kind,
+      status="in_progress", comment="why this matters / what's the
+      plan", match=<optional Cypher binding `t` to the code nodes
+      this touches>)`. `kind` ∈ {`bug`, `feature`, `task`,
+      `refactor`, `perf`, `docs`} — same vocab as Conventional
+      Commits, so it mirrors the eventual commit prefix. The
       `match` clause attaches `[:RELATES_TO]` edges so later
       `node_md(those_fns)` calls surface the worklog item.
     - **At meaningful transitions:** `worklog_set_status(id, "done"
@@ -277,6 +280,7 @@ history(limit=20)
 worklog_create(
   title   = "Migrate auth from session cookies to JWT",
   area    = "auth",
+  kind    = "feature",
   status  = "in_progress",
   comment = "Why: legal requires shorter token lifetime. Plan: rewrite middleware first, then migrate clients in batches.",
   match   = "MATCH (t:Function) WHERE t.qualified_name STARTS WITH 'crate::auth::middleware'"

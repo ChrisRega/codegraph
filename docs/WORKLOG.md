@@ -2,7 +2,7 @@
 
 _Generated from the graph by `codegraph-mcp report`. Append-only history._
 
-## [WIP] Graph-backed worklog (items / statuses / comments) + report subcommand
+## [WIP] `[feature]` Graph-backed worklog (items / statuses / comments) + report subcommand
 _id `wl-graph-worklog` · area `mcp` · created 2026-05-16T11:30:00Z_
 
 ### `in_progress` — 2026-05-16T12:00:00Z
@@ -17,7 +17,7 @@ _id `wl-graph-worklog` · area `mcp` · created 2026-05-16T11:30:00Z_
 
 ---
 
-## [DONE] Pipeline outgoingCalls in chunks of 32 (parallel LSP)
+## [DONE] `[perf]` Pipeline outgoingCalls in chunks of 32 (parallel LSP)
 _id `wl-pipeline-outgoing-calls` · area `indexer` · created 2026-05-16T10:35:00Z_
 
 ### `done` — 2026-05-16T10:41:04Z
@@ -28,7 +28,7 @@ _id `wl-pipeline-outgoing-calls` · area `indexer` · created 2026-05-16T10:35:0
 
 ---
 
-## [DONE] Skip outgoingCalls LSP requests for unchanged-body fns
+## [DONE] `[perf]` Skip outgoingCalls LSP requests for unchanged-body fns
 _id `wl-body-hash-skip` · area `indexer` · created 2026-05-16T10:20:00Z_
 
 ### `done` — 2026-05-16T10:27:40Z
@@ -39,7 +39,7 @@ _id `wl-body-hash-skip` · area `indexer` · created 2026-05-16T10:20:00Z_
 
 ---
 
-## [DONE] Skip unchanged files via FNV-1a content hash
+## [DONE] `[perf]` Skip unchanged files via FNV-1a content hash
 _id `wl-content-hash-skip` · area `indexer` · created 2026-05-16T10:00:00Z_
 
 ### `done` — 2026-05-16T10:15:56Z
@@ -50,7 +50,7 @@ _id `wl-content-hash-skip` · area `indexer` · created 2026-05-16T10:00:00Z_
 
 ---
 
-## [DONE] Watcher visibility — surface pending events during a pass
+## [DONE] `[feature]` Watcher visibility — surface pending events during a pass
 _id `wl-watcher-visibility` · area `mcp` · created 2026-05-16T09:30:00Z_
 
 ### `done` — 2026-05-16T10:06:57Z
@@ -61,7 +61,7 @@ _id `wl-watcher-visibility` · area `mcp` · created 2026-05-16T09:30:00Z_
 
 ---
 
-## [DONE] K8 — preserve [:NOTES] across reindex via snapshot/restore
+## [DONE] `[bug]` K8 — preserve [:NOTES] across reindex via snapshot/restore
 _id `wl-k8-notes-survive` · area `indexer` · created 2026-05-16T09:00:00Z_
 
 ### `done` — 2026-05-16T10:03:30Z
@@ -72,7 +72,7 @@ _id `wl-k8-notes-survive` · area `indexer` · created 2026-05-16T09:00:00Z_
 
 ---
 
-## [DONE] Phase 8 — :GitCommit:WorkingTree overlay for uncommitted edits
+## [DONE] `[feature]` Phase 8 — :GitCommit:WorkingTree overlay for uncommitted edits
 _id `wl-phase8-overlay` · area `indexer` · created 2026-05-16T08:00:00Z_
 
 ### `in_progress` — 2026-05-16T08:00:00Z
@@ -89,7 +89,7 @@ _id `wl-phase8-overlay` · area `indexer` · created 2026-05-16T08:00:00Z_
 
 ---
 
-## [DONE] K6 — per-tool MCP handler split into sibling modules
+## [DONE] `[refactor]` K6 — per-tool MCP handler split into sibling modules
 _id `wl-k6-handler-split` · area `refactor` · created 2026-05-15T22:30:00Z_
 
 ### `done` — 2026-05-15T23:08:27Z
@@ -100,7 +100,7 @@ _id `wl-k6-handler-split` · area `refactor` · created 2026-05-15T22:30:00Z_
 
 ---
 
-## [DONE] K9 fix — [:TESTS] edge duplication via velr MERGE bug
+## [DONE] `[bug]` K9 fix — [:TESTS] edge duplication via velr MERGE bug
 _id `wl-k9-tests-dedup` · area `indexer` · created 2026-05-15T22:00:00Z_
 
 ### `pending` — 2026-05-15T22:00:00Z
@@ -121,7 +121,7 @@ _id `wl-k9-tests-dedup` · area `indexer` · created 2026-05-15T22:00:00Z_
 
 ---
 
-## [DONE] K10 fix — :DocSection / :Doc accumulation across reindexes
+## [DONE] `[bug]` K10 fix — :DocSection / :Doc accumulation across reindexes
 _id `wl-k10-doc-wipe` · area `indexer` · created 2026-05-15T22:00:00Z_
 
 ### `pending` — 2026-05-15T22:00:00Z
@@ -138,7 +138,7 @@ _id `wl-k10-doc-wipe` · area `indexer` · created 2026-05-15T22:00:00Z_
 
 ---
 
-## [TODO] IndexCtx / tools::Ctx structs
+## [TODO] `[refactor]` IndexCtx / tools::Ctx structs
 _id `wl-k7-ctx-structs` · area `refactor` · created 2026-05-15T20:00:00Z_
 
 ### `pending` — 2026-05-15T20:00:00Z
@@ -149,7 +149,7 @@ _id `wl-k7-ctx-structs` · area `refactor` · created 2026-05-15T20:00:00Z_
 
 ---
 
-## [DONE] I2 — codegraph-mcp --watch mode (live reindex on save)
+## [DONE] `[feature]` I2 — codegraph-mcp --watch mode (live reindex on save)
 _id `wl-i2-watch-mode` · area `mcp` · created 2026-05-15T00:00:00Z_
 
 ### `done` — 2026-05-15T18:00:00Z
@@ -160,7 +160,7 @@ _id `wl-i2-watch-mode` · area `mcp` · created 2026-05-15T00:00:00Z_
 
 ---
 
-## [DONE] H4 — diff_since(commit) MCP tool
+## [DONE] `[feature]` H4 — diff_since(commit) MCP tool
 _id `wl-h4-diff-since` · area `mcp` · created 2026-05-14T00:00:00Z_
 
 ### `done` — 2026-05-14T20:00:00Z
@@ -171,7 +171,7 @@ _id `wl-h4-diff-since` · area `mcp` · created 2026-05-14T00:00:00Z_
 
 ---
 
-## [DONE] H1 — impact MCP tool (transitive blast radius)
+## [DONE] `[feature]` H1 — impact MCP tool (transitive blast radius)
 _id `wl-h1-impact` · area `mcp` · created 2026-05-14T00:00:00Z_
 
 ### `done` — 2026-05-14T18:00:00Z
@@ -182,7 +182,7 @@ _id `wl-h1-impact` · area `mcp` · created 2026-05-14T00:00:00Z_
 
 ---
 
-## [DONE] G3 — real revision history (:GitCommit + :Author + :PARENT_OF)
+## [DONE] `[feature]` G3 — real revision history (:GitCommit + :Author + :PARENT_OF)
 _id `wl-g3-git-history` · area `indexer` · created 2026-05-13T00:00:00Z_
 
 ### `done` — 2026-05-13T18:00:00Z
@@ -193,7 +193,7 @@ _id `wl-g3-git-history` · area `indexer` · created 2026-05-13T00:00:00Z_
 
 ---
 
-## [TODO] Replace placeholder repository URL in Cargo.toml
+## [TODO] `[task]` Replace placeholder repository URL in Cargo.toml
 _id `wl-c2-repo-url` · area `release` · created 2026-05-10T00:00:00Z_
 
 ### `pending` — 2026-05-10T00:00:00Z
@@ -204,7 +204,7 @@ _id `wl-c2-repo-url` · area `release` · created 2026-05-10T00:00:00Z_
 
 ---
 
-## [TODO] Verify rust-version = 1.75 locally
+## [TODO] `[task]` Verify rust-version = 1.75 locally
 _id `wl-c5-msrv-verify` · area `release` · created 2026-05-10T00:00:00Z_
 
 ### `pending` — 2026-05-10T00:00:00Z
@@ -215,7 +215,7 @@ _id `wl-c5-msrv-verify` · area `release` · created 2026-05-10T00:00:00Z_
 
 ---
 
-## [TODO] Pre-built release binaries via cargo-dist
+## [TODO] `[feature]` Pre-built release binaries via cargo-dist
 _id `wl-f2-cargo-dist` · area `release` · created 2026-05-10T00:00:00Z_
 
 ### `pending` — 2026-05-10T00:00:00Z
@@ -226,7 +226,7 @@ _id `wl-f2-cargo-dist` · area `release` · created 2026-05-10T00:00:00Z_
 
 ---
 
-## [TODO] bdd-viz rendering from velr (skip JSON intermediate)
+## [TODO] `[feature]` bdd-viz rendering from velr (skip JSON intermediate)
 _id `wl-f3-bdd-viz-velr` · area `viz` · created 2026-05-10T00:00:00Z_
 
 ### `pending` — 2026-05-10T00:00:00Z

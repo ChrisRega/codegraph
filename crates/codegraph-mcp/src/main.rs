@@ -377,12 +377,13 @@ fn tool_list() -> Value {
             },
             {
                 "name": "worklog_create",
-                "description": "Create a new :WorklogItem with an initial :Status (default `pending`) and optional first :Comment. Optionally attach [:RELATES_TO] edges to existing nodes via a Cypher MATCH that binds variable `t`. Status must be one of: pending, in_progress, done, blocked, abandoned. Worklog items survive --full reindex.",
+                "description": "Create a new :WorklogItem with an initial :Status (default `pending`) and optional first :Comment. Optionally attach [:RELATES_TO] edges to existing nodes via a Cypher MATCH that binds variable `t`. Status must be one of: pending, in_progress, done, blocked, abandoned. Kind classifies the work and must be one of: bug, feature, task, refactor, perf, docs (default 'task'). Worklog items survive --full reindex.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "title":   { "type": "string", "description": "Human title (1 line)." },
                         "area":    { "type": "string", "description": "Optional grouping tag, e.g. 'indexer', 'mcp', 'docs'." },
+                        "kind":    { "type": "string", "description": "Type of work: bug | feature | task | refactor | perf | docs (default 'task')." },
                         "status":  { "type": "string", "description": "Initial status (default 'pending')." },
                         "comment": { "type": "string", "description": "Optional first comment attached to the initial status." },
                         "author":  { "type": "string", "description": "Comment author (default 'claude')." },
@@ -421,12 +422,13 @@ fn tool_list() -> Value {
             },
             {
                 "name": "worklog_list",
-                "description": "List :WorklogItem nodes as a Markdown table. Optional filters: `area`, `status`. Sorted by latest status timestamp.",
+                "description": "List :WorklogItem nodes as a Markdown table. Optional filters: `area`, `status`, `kind`. Sorted by latest status timestamp.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "area":   { "type": "string", "description": "Filter by area." },
                         "status": { "type": "string", "description": "Filter by current_status." },
+                        "kind":   { "type": "string", "description": "Filter by kind (bug | feature | task | refactor | perf | docs)." },
                         "limit":  { "type": "integer", "description": "Max items (default 100)." }
                     }
                 }
