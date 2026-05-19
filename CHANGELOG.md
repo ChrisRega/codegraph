@@ -6,12 +6,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Changed
+## [0.2.0-alpha.2] - 2026-05-16
 
-- **MSRV bumped from 1.75 → 1.95.** velr 0.2.16's transitive deps
-  (`blake3` → `cpufeatures`, `constant_time_eq`) now require
-  `edition2024`, which Cargo 1.75 doesn't know. Bumping to current
-  stable is the pragmatic fix; the CI `msrv` job now pins 1.95.
+Follow-up to alpha.1: adds Go support and gets CI fully green.
 
 ### Added
 
@@ -23,6 +20,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   walks the module root recursively (Go's convention), skipping
   `vendor/`. New integration fixture at `examples/demo-go/` mirrors
   the shape of the Rust / Python / TS demos.
+
+### Changed
+
+- **MSRV bumped from 1.75 → 1.95.** velr 0.2.16's transitive deps
+  (`blake3` → `cpufeatures`, `constant_time_eq`) now require
+  `edition2024`, which Cargo 1.75 doesn't know. Bumping to current
+  stable is the pragmatic fix; the CI `msrv` job now pins 1.95.
+
+### Fixed
+
+- **CI clippy 1.95** — removed a redundant `.into_iter()` in
+  `markdown_index.rs` that tripped `clippy::useless_conversion`.
+- **CI deny licenses** — `velr` publishes with
+  `license = "non-standard"` which cargo-deny can't validate. Added
+  `[[licenses.clarify]]` blocks per velr crate overriding with a
+  local `LicenseRef-velr-non-standard` placeholder we allow.
 
 ## [0.2.0-alpha.1] - 2026-05-16
 
@@ -202,5 +215,6 @@ RETURN w.kind, w.title, w.current_status_at ORDER BY w.kind, w.title
   and `type()`) may change. The indexer / MCP server pin the entire
   feature set against velr 0.2.9 for now.
 
-[Unreleased]:      https://github.com/ChrisRega/codegraph/compare/v0.2.0-alpha.1...HEAD
+[Unreleased]:      https://github.com/ChrisRega/codegraph/compare/v0.2.0-alpha.2...HEAD
+[0.2.0-alpha.2]:   https://github.com/ChrisRega/codegraph/compare/v0.2.0-alpha.1...v0.2.0-alpha.2
 [0.2.0-alpha.1]:   https://github.com/ChrisRega/codegraph/compare/v0.1.0...v0.2.0-alpha.1
