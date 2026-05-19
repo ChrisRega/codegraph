@@ -305,14 +305,36 @@ Override the binary with `--lsp <path>`.
 
 ## License
 
-Dual-licensed under
+The `codegraph` source code in this repository is dual-licensed under
 
 - Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
 - MIT license ([LICENSE-MIT](LICENSE-MIT))
 
-at your option.
+at your option. Unless you explicitly state otherwise, any
+contribution intentionally submitted for inclusion in this work by
+you, as defined in the Apache-2.0 license, shall be dual-licensed as
+above, without any additional terms or conditions.
 
-Unless you explicitly state otherwise, any contribution intentionally
-submitted for inclusion in this work by you, as defined in the
-Apache-2.0 license, shall be dual-licensed as above, without any
-additional terms or conditions.
+### Heads up about the velr dependency
+
+> **The compiled binary is NOT MIT/Apache-2.0.** `codegraph` links
+> against [velr](https://crates.io/crates/velr), whose published
+> manifest declares `license = "non-standard"` (i.e. neither MIT nor
+> Apache, and not an OSI-approved open-source license at all). The
+> actual licence text lives in the
+> [velr-ai/velr-rust-driver](https://github.com/velr-ai/velr-rust-driver)
+> repository — read it before you redistribute, embed, or ship the
+> resulting binary anywhere.
+>
+> Practically: the *source* in this repo is yours to fork, patch, and
+> reuse on permissive terms. The *binary you compile from it* inherits
+> velr's terms on top, and those are stricter than MIT/Apache. If
+> you're building this for personal use or evaluation that's
+> generally fine; if you're shipping it to customers, putting it
+> behind a public service, or bundling it into another product, check
+> velr's licence first.
+>
+> `deny.toml` in this repo carries explicit
+> `[[licenses.clarify]]` blocks for the velr crates so `cargo deny`
+> can validate the build; that is a build-system acknowledgement of
+> velr's non-SPDX manifest, not a legal opinion or a relicensing.
