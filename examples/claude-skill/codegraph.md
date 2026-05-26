@@ -28,6 +28,9 @@ Sorted by frequency you should reach for them in a typical session.
 | `explore(label, key, value, char_budget, max_depth)` | Token-budgeted BFS. Replaces the multi-`node_md`-call pattern when you want a bounded subgraph dossier. Footer reports drops so you know whether to raise the budget. |
 | `impact(value, depth, top)` | Transitive blast radius for a `:Function`: callers + callees (BFS over `[:CALLS]`) plus doc mentions and BDD scenarios. Use before any refactor. |
 | `coverage_md(limit)` | The "dim spots" report — orphan functions, untested functions ranked by fan-in, files with no notes, packages with zero doc mentions. Onboarding hot list. |
+| `dead_code(exclude_tests?, ignore_test_callers?, kind?, name_skip?, limit?)` | `:Function`s with no incoming `:CALLS` — graph-derived suspicious functions. Hint generator, not a verdict: `main`, public API, FFI, string-matched dispatch and trait impls look dead because the caller side isn't in the AST. Defaults exclude `:Test` candidates and count test-only callers as life; flip `ignore_test_callers=true` for a "covered-only-by-tests" sweep. `name_skip` filters obvious entry-point prefixes (`main`, `handle_`, `phase_`). |
+| `graph_export(label, key, value, depth?, format?, max_nodes?)` | Node-centered subgraph as Mermaid `flowchart LR` (default) or Graphviz DOT. BFS from seed, clamped depth 1–3, capped at 200 nodes. Output is fenced so it round-trips into GitHub / chats / `:Note` bodies. Neighbour identity uses coalesce(qualified_name, id, path, name, hash). At depth > 1, only nodes with the seed's label/key continue the BFS. |
+| `arch_overlay(workspace_name?)` | Subprocesses `claude -p` to derive an `:ArchModule` overlay on the live DB: gathers `:Package` + hot `:Function`s + cross-package `:CALLS` density, asks the agent for a 3–7-module coarse architecture, writes back `:ArchModule` + `[:CONTAINS]`→`:Package` + `[:GROUPS]`→`:Function` + `[:USES]` edges with `semantic_kind`/`description`/`layer_hint`. In-session counterpart to `codegraph-indexer --full --with-arch-agent`. Real cost: one API call + a few seconds. Failures degrade silently — check stderr. Use this when the user wants a fresh "what does this repo decompose into" view, then visualise with `graph_export(label="ArchModule", …)`. |
 | `diff_since(commit, limit)` | What landed between a baseline `:GitCommit` and HEAD. Lists commits in range + `:File`/`:Function` whose `first_seen_commit` lands inside. **Removals are not tracked** (no tombstones in the indexer). |
 | `history(limit)` | List `:GitCommit` snapshots recorded in the graph, newest first. |
 
@@ -71,6 +74,9 @@ Labels that appear depending on what's been written:
   `:Status` / `:Comment` (from the `worklog_*` tools)
 - **Derived during Phase 6:** `:Test` (added to `:Function`s whose body
   contains `#[test]` / `#[tokio::test]`)
+- **Optional agent overlay (Phase 5b):** `:ArchModule` from
+  `arch_overlay` or `--with-arch-agent`. Wiped + re-derived per agent
+  run; visualise with `graph_export`.
 
 Key edges:
 
@@ -85,6 +91,11 @@ Key edges:
 - Worklog: `HAS_STATUS` (`:WorklogItem` → `:Status`, append-only),
   `HAS_COMMENT` (`:Status` → `:Comment`, 1:n),
   `RELATES_TO` (`:WorklogItem` → any code/doc node)
+- Architecture (agent overlay): `CONTAINS` (`:ArchModule` → `:Package`),
+  `GROUPS` (`:ArchModule` → `:Function` for sub-package splits),
+  `USES {semantic_kind}` (`:ArchModule` → `:ArchModule`),
+  `REFERENCES` (`:GitCommit` → `:WorklogItem`, from `Refs:`-trailer
+  parsing in commit messages)
 
 Full reference: `docs/schema.md`.
 
@@ -220,6 +231,35 @@ These bit me while building the tools — bake them into your queries:
     across the project's whole life — including across CG upgrades.
     Per-project: each repo has its own `codegraph.db` and therefore
     its own worklog; cross-project tracking is out of scope today.
+
+11. **For "what does this repo decompose into" questions, run
+    `arch_overlay` once and then `graph_export`.** The agent overlay
+    is opt-in (costs an API call) and re-derivable. Use it when the
+    user asks for an architecture diagram, a "give me the lay of the
+    land" sweep, or wants to validate that a refactor preserves
+    module boundaries. The overlay sits in a separate label
+    (`:ArchModule`) so it composes with everything else — link a
+    `:WorklogItem` to the module it touches via
+    `worklog_create(match="MATCH (t:ArchModule {name: 'mcp-server'})")`.
+
+    Two ways to trigger:
+    - **In-session (this is the default):** `arch_overlay()` — uses
+      the live DB, takes seconds, and surfaces the new module count
+      in the response. Pair it with `cypher("MATCH (a:ArchModule)
+      RETURN a.name, a.semantic_kind, a.layer_hint ORDER BY
+      a.layer_hint, a.name")` for the textual view, or
+      `graph_export(label="ArchModule", key="name", value="<name>")`
+      for a Mermaid diagram.
+    - **Out-of-session (during a CLI reindex):** add
+      `--with-arch-agent` to a `codegraph-indexer --full` invocation.
+      Same code path, no MCP server needed; useful for CI / cron
+      that wants the overlay refreshed alongside a full reindex.
+
+    Both require the `claude` CLI in `PATH`. Failures (CLI missing,
+    parse error, exit-nonzero) degrade silently — the previous
+    overlay is wiped first, so the graph ends with no
+    `:ArchModule` rather than a partial one. The error message tells
+    you exactly which mode you hit.
 
 ## Quick recipes
 

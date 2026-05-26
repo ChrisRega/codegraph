@@ -1,0 +1,646 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>codegraph — architecture view</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..900;1,9..144,300..900&family=Newsreader:ital,opsz,wght@0,6..72,200..800;1,6..72,200..800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <style>
+    :root {
+      --paper:   #f4efe4;
+      --paper-2: #ebe5d6;
+      --paper-3: #ddd5c0;
+      --ink:     #1a1612;
+      --ink-soft:#4a4137;
+      --rule:    #2a221a;
+      --muted:   #8a7d6a;
+      --accent:  #9c3a14;
+      --accent-2:#2a4630;
+      --data:    #1f4d7a;
+      --control: #9c3a14;
+
+      --chip-core:    #c8b89a;
+      --chip-lib:     #d4c4a3;
+      --chip-adapter: #e0c89e;
+      --chip-infra:   #e6cdaf;
+      --chip-protocol:#eed4a8;
+      --chip-cli:     #c9d2bb;
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html { background: var(--paper); }
+    body {
+      color: var(--ink);
+      font-family: 'Newsreader', Georgia, serif;
+      font-size: 17px;
+      line-height: 1.55;
+      min-height: 100vh;
+      padding: 72px 56px 56px;
+      background:
+        radial-gradient(circle at 1px 1px, rgba(26,22,18,0.055) 1px, transparent 0)
+          0 0 / 22px 22px,
+        var(--paper);
+    }
+
+    /* Frame */
+    .frame {
+      max-width: 1200px;
+      margin: 0 auto;
+      position: relative;
+    }
+    .corner {
+      position: absolute;
+      width: 28px;
+      height: 28px;
+      border: 1px solid var(--ink);
+    }
+    .corner-tl { top: -14px;    left: -14px;  border-right: none; border-bottom: none; }
+    .corner-tr { top: -14px;    right: -14px; border-left:  none; border-bottom: none; }
+    .corner-bl { bottom: -14px; left: -14px;  border-right: none; border-top:    none; }
+    .corner-br { bottom: -14px; right: -14px; border-left:  none; border-top:    none; }
+
+    /* Header */
+    .header {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: end;
+      gap: 48px;
+      border-bottom: 1px solid var(--rule);
+      padding-bottom: 32px;
+      margin-bottom: 56px;
+    }
+    .eyebrow {
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 11px;
+      letter-spacing: 0.24em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 18px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+    .eyebrow::after {
+      content: '';
+      display: inline-block;
+      flex: 1;
+      max-width: 80px;
+      height: 1px;
+      background: var(--muted);
+    }
+    h1 {
+      font-family: 'Fraunces', serif;
+      font-weight: 300;
+      font-style: italic;
+      font-variation-settings: "opsz" 144, "SOFT" 80;
+      font-size: clamp(44px, 6.4vw, 88px);
+      letter-spacing: -0.025em;
+      line-height: 0.92;
+      color: var(--ink);
+    }
+    h1 em {
+      font-family: 'Fraunces', serif;
+      font-weight: 700;
+      font-style: normal;
+      font-variation-settings: "opsz" 144, "SOFT" 30;
+      color: var(--accent);
+      font-size: 0.95em;
+      position: relative;
+      padding-bottom: 4px;
+    }
+    h1 em::after {
+      content: '';
+      position: absolute;
+      left: 0; right: 0; bottom: -2px;
+      height: 5px;
+      background: var(--accent);
+      opacity: 0.18;
+    }
+    .subtitle {
+      font-family: 'Newsreader', serif;
+      font-style: italic;
+      color: var(--ink-soft);
+      margin-top: 22px;
+      max-width: 60ch;
+      font-size: 18px;
+      line-height: 1.5;
+    }
+    .subtitle code,
+    .footer code,
+    body code {
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-style: normal;
+      font-size: 0.92em;
+      color: var(--accent);
+      background: rgba(156,58,20,0.06);
+      padding: 0 4px;
+      border-radius: 2px;
+    }
+
+    .meta-col {
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 11px;
+      letter-spacing: 0.06em;
+      color: var(--ink-soft);
+      text-align: right;
+      min-width: 180px;
+    }
+    .meta-col dl {
+      display: grid;
+      grid-template-columns: auto auto;
+      gap: 5px 22px;
+      justify-content: end;
+    }
+    .meta-col dt { color: var(--muted); text-transform: uppercase; letter-spacing: 0.12em; }
+    .meta-col dd { color: var(--ink); font-weight: 500; }
+    .meta-col dd.big { font-family: 'Fraunces', serif; font-size: 18px; font-weight: 500; letter-spacing: 0; }
+
+    /* Stage = diagram surface */
+    .stage {
+      background: var(--paper-2);
+      border: 1px solid var(--rule);
+      padding: 64px 40px 48px;
+      margin-bottom: 64px;
+      position: relative;
+    }
+    .stage::before {
+      content: 'fig. 1   //   module dependency overlay';
+      position: absolute;
+      top: -10px;
+      left: 28px;
+      background: var(--paper);
+      padding: 0 14px;
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 10px;
+      letter-spacing: 0.22em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    .stage::after {
+      content: 'arch_overlay → claude -p   //   2026-05-26';
+      position: absolute;
+      bottom: -10px;
+      right: 28px;
+      background: var(--paper);
+      padding: 0 14px;
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 10px;
+      letter-spacing: 0.18em;
+      color: var(--muted);
+    }
+    .mermaid {
+      display: flex;
+      justify-content: center;
+      background: transparent;
+    }
+    .mermaid svg { max-width: 100%; height: auto; }
+
+    /* Two-column body grid */
+    .grid {
+      display: grid;
+      grid-template-columns: 1.55fr 1fr;
+      gap: 64px;
+      margin-bottom: 72px;
+    }
+    h2 {
+      font-family: 'Fraunces', serif;
+      font-weight: 500;
+      font-style: italic;
+      font-size: 24px;
+      letter-spacing: -0.01em;
+      margin-bottom: 24px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid var(--rule);
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+    }
+    h2 .count {
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 11px;
+      letter-spacing: 0.18em;
+      color: var(--muted);
+      font-style: normal;
+      font-weight: 400;
+    }
+
+    /* Module list */
+    .modules { display: grid; gap: 0; }
+    .row {
+      display: grid;
+      grid-template-columns: 56px 1fr;
+      gap: 24px;
+      padding: 18px 0;
+      border-bottom: 1px dotted rgba(74,65,55,0.4);
+    }
+    .row:last-child { border-bottom: none; }
+    .row .layer-tag {
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 10px;
+      letter-spacing: 0.16em;
+      color: var(--muted);
+      text-transform: uppercase;
+      padding-top: 4px;
+    }
+    .row .layer-tag .num {
+      display: block;
+      font-family: 'Fraunces', serif;
+      font-size: 28px;
+      font-style: italic;
+      font-weight: 300;
+      color: var(--ink);
+      line-height: 1;
+      margin-bottom: 4px;
+    }
+    .row .body .name {
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-weight: 500;
+      font-size: 15px;
+      color: var(--ink);
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 8px;
+    }
+    .kind-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 10px;
+      letter-spacing: 0.1em;
+      text-transform: lowercase;
+      color: var(--ink);
+      padding: 2px 8px 2px 7px;
+      border: 1px solid var(--ink);
+    }
+    .kind-chip::before {
+      content: '';
+      display: inline-block;
+      width: 7px;
+      height: 7px;
+      background: var(--c, var(--ink));
+    }
+    .row .body .desc {
+      font-family: 'Newsreader', serif;
+      color: var(--ink-soft);
+      font-size: 15px;
+      line-height: 1.5;
+      max-width: 60ch;
+    }
+
+    /* Legend */
+    .legend { display: grid; gap: 18px; }
+    .legend-row {
+      display: grid;
+      grid-template-columns: 56px 1fr;
+      align-items: center;
+      gap: 16px;
+    }
+    .lane {
+      height: 12px;
+      position: relative;
+      display: flex;
+      align-items: center;
+    }
+    .lane::before {
+      content: '';
+      flex: 1;
+      height: 1.5px;
+      background: var(--lc, var(--ink));
+    }
+    .lane.dashed::before {
+      background: linear-gradient(to right,
+        var(--lc) 0 5px, transparent 5px 9px,
+        var(--lc) 9px 14px, transparent 14px 18px,
+        var(--lc) 18px 23px, transparent 23px 27px,
+        var(--lc) 27px 32px, transparent 32px 36px,
+        var(--lc) 36px 41px, transparent 41px 45px,
+        var(--lc) 45px 50px, transparent 50px 54px);
+    }
+    .lane::after {
+      content: '';
+      width: 0; height: 0;
+      border-left: 7px solid var(--lc, var(--ink));
+      border-top: 4px solid transparent;
+      border-bottom: 4px solid transparent;
+    }
+    .legend .label {
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 12px;
+      letter-spacing: 0.04em;
+    }
+    .legend .label .note {
+      display: block;
+      font-family: 'Newsreader', serif;
+      font-style: italic;
+      color: var(--ink-soft);
+      font-size: 13px;
+      letter-spacing: 0;
+      margin-top: 4px;
+    }
+    .legend .label strong {
+      font-weight: 700;
+      letter-spacing: 0.06em;
+    }
+    .kind-list {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px 16px;
+      margin-top: 18px;
+    }
+    .kind-list .kind-chip {
+      justify-self: start;
+    }
+
+    /* Footer / footnotes */
+    .footer {
+      border-top: 1px solid var(--rule);
+      padding-top: 28px;
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 32px;
+      align-items: start;
+    }
+    .footer .notes {
+      font-family: 'Newsreader', serif;
+      color: var(--ink-soft);
+      font-size: 14px;
+      line-height: 1.65;
+      max-width: 78ch;
+    }
+    .footer .notes p { margin-bottom: 10px; }
+    .footer sup {
+      color: var(--accent);
+      font-family: 'Fraunces', serif;
+      font-weight: 700;
+      font-style: italic;
+      font-size: 0.92em;
+      margin-right: 5px;
+      vertical-align: super;
+      line-height: 0;
+    }
+    .footer .sig {
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 10px;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: var(--muted);
+      text-align: right;
+      writing-mode: vertical-rl;
+      transform: rotate(180deg);
+      padding-top: 4px;
+    }
+
+    /* Mermaid theming polish */
+    .mermaid .cluster rect {
+      fill: transparent !important;
+      stroke: var(--muted) !important;
+      stroke-dasharray: 3 4 !important;
+      stroke-width: 1 !important;
+      rx: 0 !important;
+      ry: 0 !important;
+    }
+    .mermaid .cluster .cluster-label {
+      font-family: 'JetBrains Mono', ui-monospace, monospace !important;
+      font-size: 10px !important;
+      letter-spacing: 0.18em !important;
+      text-transform: uppercase !important;
+      fill: var(--muted) !important;
+    }
+    .mermaid .nodeLabel {
+      font-family: 'JetBrains Mono', ui-monospace, monospace !important;
+      font-size: 12px !important;
+      color: var(--ink) !important;
+    }
+    .mermaid .edgeLabel {
+      font-family: 'JetBrains Mono', ui-monospace, monospace !important;
+      font-size: 10px !important;
+      letter-spacing: 0.08em !important;
+      background: var(--paper-2) !important;
+      padding: 1px 5px !important;
+    }
+    .mermaid .edgeLabel rect { fill: var(--paper-2) !important; }
+    .mermaid .node rect, .mermaid .node polygon {
+      rx: 0 !important;
+      ry: 0 !important;
+    }
+
+    @media (max-width: 880px) {
+      body { padding: 36px 22px; }
+      .header { grid-template-columns: 1fr; gap: 24px; }
+      .meta-col { text-align: left; min-width: 0; }
+      .meta-col dl { justify-content: start; }
+      .stage { padding: 36px 16px 32px; }
+      .grid { grid-template-columns: 1fr; gap: 48px; }
+      .footer { grid-template-columns: 1fr; }
+      .footer .sig { writing-mode: horizontal-tb; transform: none; text-align: left; }
+    }
+
+    /* Print: assume serif on white */
+    @media print {
+      body { background: white; padding: 24px; }
+      .stage, .meta-col { background: white; }
+      .corner { display: none; }
+    }
+  </style>
+</head>
+<body>
+<div class="frame">
+  <span class="corner corner-tl"></span>
+  <span class="corner corner-tr"></span>
+  <span class="corner corner-bl"></span>
+  <span class="corner corner-br"></span>
+
+  <header class="header">
+    <div>
+      <div class="eyebrow">document · arch-overlay · rev 1</div>
+      <h1>codegraph<br><em>architecture</em> view</h1>
+      <p class="subtitle">
+        Derived in-session by the <code>arch_overlay</code> agent from the post-LSP graph
+        — six modules across four layers, eleven directed <code>:USES</code> edges,
+        two reciprocal pairs. The pipeline that produced this diagram is itself one
+        of the nodes in it.
+      </p>
+    </div>
+    <aside class="meta-col">
+      <dl>
+        <dt>repo</dt><dd>codegraph</dd>
+        <dt>modules</dt><dd class="big">6</dd>
+        <dt>edges</dt><dd class="big">11</dd>
+        <dt>cycles</dt><dd>2</dd>
+        <dt>layers</dt><dd>0 → 3</dd>
+        <dt>source</dt><dd>:Function · :Package · :CALLS</dd>
+      </dl>
+    </aside>
+  </header>
+
+  <section class="stage">
+    <div class="mermaid">
+flowchart TB
+    subgraph L3["layer 03 // surface"]
+        direction LR
+        ic["indexer-cli<br/>:cli"]:::cli
+        ms["mcp-server<br/>:protocol"]:::protocol
+    end
+    subgraph L2["layer 02 // runtime"]
+        wt["watcher<br/>:infra"]:::infra
+    end
+    subgraph L1["layer 01 // engine"]
+        direction LR
+        ip["indexer-pipeline<br/>:lib"]:::lib
+        la["lsp-adapter<br/>:adapter"]:::adapter
+    end
+    subgraph L0["layer 00 // foundation"]
+        gc["graph-core<br/>:core"]:::core
+    end
+
+    ip -- "data" --> gc
+    la -- "data" --> gc
+    ic -- "data" --> gc
+    ms -- "data" --> gc
+    ip -- "control" --> la
+    la -- "control" --> ip
+    ic -- "control" --> ip
+    ms -- "control" --> ip
+    ms -- "control" --> wt
+    wt -- "control" --> ip
+    wt -- "control" --> ms
+
+    classDef core     fill:#c8b89a,stroke:#1a1612,stroke-width:2px,color:#1a1612;
+    classDef lib      fill:#d4c4a3,stroke:#1a1612,stroke-width:1.5px,color:#1a1612;
+    classDef adapter  fill:#e0c89e,stroke:#1a1612,stroke-width:1.5px,color:#1a1612;
+    classDef infra    fill:#e6cdaf,stroke:#1a1612,stroke-width:1.5px,color:#1a1612;
+    classDef protocol fill:#eed4a8,stroke:#9c3a14,stroke-width:2px,color:#1a1612;
+    classDef cli      fill:#c9d2bb,stroke:#2a4630,stroke-width:1.5px,color:#1a1612;
+
+    linkStyle 0 stroke:#1f4d7a,stroke-width:1.6px;
+    linkStyle 1 stroke:#1f4d7a,stroke-width:1.6px;
+    linkStyle 2 stroke:#1f4d7a,stroke-width:1.6px;
+    linkStyle 3 stroke:#1f4d7a,stroke-width:1.6px;
+    linkStyle 4 stroke:#9c3a14,stroke-width:1.6px,stroke-dasharray:5 4;
+    linkStyle 5 stroke:#9c3a14,stroke-width:1.6px,stroke-dasharray:5 4;
+    linkStyle 6 stroke:#9c3a14,stroke-width:1.6px,stroke-dasharray:5 4;
+    linkStyle 7 stroke:#9c3a14,stroke-width:1.6px,stroke-dasharray:5 4;
+    linkStyle 8 stroke:#9c3a14,stroke-width:1.6px,stroke-dasharray:5 4;
+    linkStyle 9 stroke:#9c3a14,stroke-width:1.6px,stroke-dasharray:5 4;
+    linkStyle 10 stroke:#9c3a14,stroke-width:1.6px,stroke-dasharray:5 4;
+    </div>
+  </section>
+
+  <div class="grid">
+    <section>
+      <h2>Modules <span class="count">06 / total</span></h2>
+      <div class="modules">
+
+        <article class="row">
+          <div class="layer-tag"><span class="num">00</span>foundation</div>
+          <div class="body">
+            <div class="name">graph-core <span class="kind-chip" style="--c:var(--chip-core)">core</span></div>
+            <div class="desc">Foundational graph database wrapper around velr — <code>Db</code> open/run/query, <code>Cell</code> / <code>Table</code> accessors, and Cypher string-escaping helpers used by every other module.</div>
+          </div>
+        </article>
+
+        <article class="row">
+          <div class="layer-tag"><span class="num">01</span>engine</div>
+          <div class="body">
+            <div class="name">indexer-pipeline <span class="kind-chip" style="--c:var(--chip-lib)">lib</span></div>
+            <div class="desc">Orchestrates the multi-phase indexing pipeline — walks the workspace, runs per-phase passes, and writes <code>:File</code> / <code>:Symbol</code> / <code>:Package</code> nodes into the graph.</div>
+          </div>
+        </article>
+
+        <article class="row">
+          <div class="layer-tag"><span class="num">01</span>engine</div>
+          <div class="body">
+            <div class="name">lsp-adapter <span class="kind-chip" style="--c:var(--chip-adapter)">adapter</span></div>
+            <div class="desc">Language-server adapter inside the indexer — owns the persistent <code>LspPool</code>, drives per-language servers, and ingests their symbols into the graph.</div>
+          </div>
+        </article>
+
+        <article class="row">
+          <div class="layer-tag"><span class="num">02</span>runtime</div>
+          <div class="body">
+            <div class="name">watcher <span class="kind-chip" style="--c:var(--chip-infra)">infra</span></div>
+            <div class="desc">Filesystem-watch layer in the MCP crate — debounces <code>notify</code> events and re-drives the indexer pipeline in live mode, keeping the graph in sync with edits.</div>
+          </div>
+        </article>
+
+        <article class="row">
+          <div class="layer-tag"><span class="num">03</span>surface</div>
+          <div class="body">
+            <div class="name">mcp-server <span class="kind-chip" style="--c:var(--chip-protocol)">protocol</span></div>
+            <div class="desc">MCP protocol surface — per-tool handlers (<code>explore</code>, <code>find</code>, <code>notes</code>, <code>views</code>, <code>concepts</code>, <code>worklog</code>, <code>watch</code>, <code>report</code>) plus shared <code>util</code> / <code>tx</code> wiring exposed to Claude Code.</div>
+          </div>
+        </article>
+
+        <article class="row">
+          <div class="layer-tag"><span class="num">03</span>surface</div>
+          <div class="body">
+            <div class="name">indexer-cli <span class="kind-chip" style="--c:var(--chip-cli)">cli</span></div>
+            <div class="desc">Standalone indexer binaries (<code>bdd_viz</code> and friends) — a thin CLI front-door over the same pipeline used by the MCP server.</div>
+          </div>
+        </article>
+
+      </div>
+    </section>
+
+    <aside>
+      <h2>Edge legend <span class="count">02 / kinds</span></h2>
+      <div class="legend">
+        <div class="legend-row">
+          <span class="lane" style="--lc:var(--data)"></span>
+          <span class="label"><strong>DATA</strong><span class="note">Read / write of graph state. Foundational dependency: the source can't function without what it reaches.</span></span>
+        </div>
+        <div class="legend-row">
+          <span class="lane dashed" style="--lc:var(--control)"></span>
+          <span class="label"><strong>CONTROL</strong><span class="note">Invocation / lifecycle flow. The source drives the target — spawns, calls, awaits.</span></span>
+        </div>
+      </div>
+
+      <h2 style="margin-top: 44px;">Semantic kinds <span class="count">06 / variants</span></h2>
+      <div class="kind-list">
+        <span class="kind-chip" style="--c:var(--chip-core)">core</span>
+        <span class="kind-chip" style="--c:var(--chip-lib)">lib</span>
+        <span class="kind-chip" style="--c:var(--chip-adapter)">adapter</span>
+        <span class="kind-chip" style="--c:var(--chip-infra)">infra</span>
+        <span class="kind-chip" style="--c:var(--chip-protocol)">protocol</span>
+        <span class="kind-chip" style="--c:var(--chip-cli)">cli</span>
+      </div>
+    </aside>
+  </div>
+
+  <footer class="footer">
+    <div class="notes">
+      <p><sup>1</sup>The graph carries two reciprocal pairs: <code>indexer-pipeline ↔ lsp-adapter</code> and <code>watcher ↔ mcp-server</code>. Strict acyclic layering is therefore violated. Both are benign — the adapter calls shared pipeline helpers, and the watcher emits lifecycle events back to the server that spawned it — but worth noting before any refactor that assumes a clean DAG.</p>
+      <p><sup>2</sup>This document was generated by the <code>arch_overlay</code> MCP tool on the live database. Re-running the agent may produce slightly different groupings; node identity is keyed on <code>:ArchModule.name</code>, so the overlay is re-derivable but not byte-identical across runs.</p>
+    </div>
+    <div class="sig">arch_overlay · claude · velr · v0.2.0</div>
+  </footer>
+</div>
+
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'base',
+    securityLevel: 'loose',
+    flowchart: { useMaxWidth: true, htmlLabels: true, padding: 14, nodeSpacing: 50, rankSpacing: 60 },
+    themeVariables: {
+      fontFamily: 'JetBrains Mono, ui-monospace, monospace',
+      fontSize:  '12px',
+      background: 'transparent',
+      primaryColor: '#f4efe4',
+      primaryBorderColor: '#1a1612',
+      primaryTextColor: '#1a1612',
+      lineColor: '#1a1612',
+      edgeLabelBackground: '#ebe5d6',
+      tertiaryColor: '#ebe5d6',
+      clusterBkg: 'transparent',
+      clusterBorder: '#8a7d6a',
+      titleColor: '#4a4137'
+    }
+  });
+</script>
+</body>
+</html>

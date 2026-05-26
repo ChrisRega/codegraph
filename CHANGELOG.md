@@ -6,6 +6,79 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`dead_code` MCP tool (nx-06).** Lists `:Function` nodes with no
+  incoming `:CALLS` edges. Two-query design (candidates + callers,
+  client-side set-diff) sidesteps velr's expensive `OPTIONAL MATCH +
+  NOT` shape. Defaults exclude `:Test` candidates and count test
+  callers as life; `ignore_test_callers=true` flips to a
+  "covered-only-by-tests" sweep. `name_skip` filters obvious entry
+  points (`main`, `handle_`, `phase_`). Output is `file:line` grouped
+  so it's editor-jumpable, and the disclaimer about dynamic dispatch
+  / FFI / pub-API false positives is part of the response.
+- **Agent-driven architecture overlay (nx-18).** New
+  `--with-arch-agent` CLI flag on `codegraph-indexer` runs an
+  agent pass at the end of a `--full` reindex: gathers the
+  workspace's `:Package` list, hot functions per package and
+  cross-package `:CALLS` density, hands it to `claude -p` with a
+  fixed JSON schema, and MERGEs the response back as `:ArchModule`
+  nodes plus `[:CONTAINS]` → `:Package`, `[:GROUPS]` → `:Function`,
+  `[:USES {semantic_kind}]` edges. Each module gets a
+  `semantic_kind` (core / adapter / protocol / cli / lib / app /
+  test / infra), short description and `layer_hint`. Modules can
+  span multiple packages (1:N) and split a package by function
+  set (`groups_functions`) — the prompt explicitly nudges 3–7
+  modules instead of 1:1-with-`:Package`. Failure modes (missing
+  CLI, bad JSON, exit-nonzero) all degrade silently — the
+  previous overlay was wiped first, so the graph ends with no
+  `:ArchModule` rather than a partial one. Visualise via
+  `graph_export(label="ArchModule", key="name", value="<name>")`.
+  Supersedes the heuristic experiment under nx-15.
+- **`graph_export` MCP tool (nx-05).** Render a node-centered subgraph
+  as a Mermaid `flowchart LR` (default) or Graphviz DOT diagram. BFS
+  from the seed, clamped depth 1–3, capped at 200 nodes. Output is
+  fenced (```mermaid / ```dot) so it round-trips into GitHub, chats
+  and `:Note` bodies. Identity for neighbour nodes uses a coalesce
+  bouquet (qualified_name / id / path / name / hash) so heterogeneous
+  neighbours render with a useful label without per-label tables.
+- **Commit-trailer → worklog auto-link (nx-09).** `phase_history`
+  parses `Refs: nx-XX` (case-insensitive, comma- or space-separated,
+  multiple per message) out of every commit message and MERGEs a
+  `[:REFERENCES]` edge from the `:GitCommit` to each matching
+  `:WorklogItem`. Unknown ids are silent no-ops via the join MATCH —
+  cross-repo or stale trailers don't pollute the graph.
+
+### Changed
+
+- **`main.rs` test extraction (nx-04).** All `#[cfg(test)] mod tests`
+  content moved out of `crates/codegraph-mcp/src/main.rs` into a
+  sibling `tests.rs` module via `#[cfg(test)] mod tests;`. main.rs
+  drops from ~1.7k to ~900 LoC, well under the 2k cap CLAUDE.md
+  enforces. Per-sibling-module distribution is deferred.
+- **`worklog_list` shows comment count + last activity (nx-08).** Two
+  new columns: `comments` (per-item total) and `last_activity` (max of
+  the latest status timestamp and the latest comment timestamp).
+  Aggregated client-side via a second MATCH + HashMap fold so velr's
+  thin COUNT/subquery surface is sidestepped.
+
+### Added
+
+- **Transaction-leak telemetry (nx-01).** Each MCP `begin` now assigns
+  a monotonic `tx#N` id and tracks `opened_at`. `begin` / `commit` /
+  `rollback` write a one-line stderr log with the id, query count and
+  elapsed time. A `begin` issued while another tx is still open logs a
+  WARNING — that pattern is the prime suspect for the sporadic WAL
+  bloat we hit during long agent sessions.
+- **DB / WAL / open-tx surface in `index_status` (nx-02).** A new
+  `## Database files` block reports the velr DB, WAL and SHM file
+  sizes (binary units) and any currently-open buffered transaction
+  (tx#, age, pending count, optional message). Shown unconditionally —
+  even without `--watch` — because the bloat is independent of the
+  watcher. A ⚠ marker fires when the WAL crosses 100 MiB or an open
+  tx is older than 30 s, so the bug is noticeable before it becomes a
+  20 GB problem.
+
 ## [0.2.0-alpha.2] - 2026-05-16
 
 Follow-up to alpha.1: adds Go support and gets CI fully green.
