@@ -6,8 +6,55 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0-alpha.3] - 2026-05-27
+
+The "agent + diagnostics" alpha — adds the agent-driven `:ArchModule`
+overlay (PR #3), three new MCP diagnostic tools (`graph_export`,
+`dead_code`, `arch_overlay`), the `:PR`-as-graph-node import path,
+and a fix for the live-mode CALL-extraction asymmetry that made
+freshly-shipped code look dead. Two velr bugs we'd worked around
+were fixed upstream in the meantime (0.2.16 → 0.2.17).
+
+### Fixed
+
+- **Live-mode CALL extraction (nx-16).** When a fresh function landed
+  in a file that the watcher reparsed in isolation, the caller-side
+  `[:CALLS]` edges from files NOT in the same batch never appeared —
+  the function showed up as "dead" in `dead_code` until the next
+  `--full`. Added `incoming_calls_batch` to the LSP wrapper plus an
+  incoming-pass in `index_files_via_lsp` that MERGEs caller → callee
+  edges for every function in the current batch. Asymmetry-bridge,
+  not a full rewrite of the live model.
+
+### Added
+
+- **`coverage_md --by-package` rollup (nx-7).** Pass `by_package: true`
+  for a one-row-per-internal-`:Package` table with `fns / orphan /
+  untested / files / no_note / doc_mentions`, sorted by the
+  "needs-attention" score (orphan + untested desc). Function ↔ package
+  assignment by longest path-prefix, same heuristic as `arch.rs`.
+- **`import_pr` MCP tool (nx-11).** New `:PR` node from a
+  `gh pr view --json …` payload (idempotent on `number`). Materialises
+  `[:AUTHORED]` from the `:Author`, `[:MERGES_INTO]` to a `:GitCommit`
+  when the sha is in the graph, and `[:REFERENCES]` to every
+  `:WorklogItem` mentioned in title or body (permissive `nx-XX`-style
+  matcher — looser than the strict `Refs:` trailer parser the
+  indexer uses on commit messages).
+- **`:Concept` → target direct edge (nx-12).** `define_concept` now
+  emits `[:RELATES_TO]` alongside the existing `[:DESCRIBES]`, so
+  navigation queries like
+  `MATCH (c:Concept)-[:RELATES_TO]->(f:Function)` become one hop.
+  `[:DESCRIBES]` stays for backward compatibility.
+
 ### Changed
 
+- **`crates/codegraph-indexer/src/lib.rs` split (nx-3).** Manifest-driven
+  package/source discovery (Cargo, npm, pyproject, go.mod — the four
+  `index_*_packages` functions plus `collect_source_files`) moved to a
+  sibling `projects.rs` module (~660 LoC). `lib.rs` drops 2843 → 2294
+  LoC. Pure mechanical extraction; the `pub(crate)` boundary is the
+  only public surface change. Further splits (phase_history, BDD,
+  watch triggers) are follow-ups.
 - **velr bumped 0.2.16 → 0.2.17.** Two bugs we'd worked around are
   fixed upstream: unanchored `MATCH ()-[r:R]->() DELETE r` now drains
   in one pass (see `docs/velr-bugs/0001-…md`), and `MERGE` on a
@@ -298,6 +345,7 @@ RETURN w.kind, w.title, w.current_status_at ORDER BY w.kind, w.title
   and `type()`) may change. The indexer / MCP server pin the entire
   feature set against velr 0.2.9 for now.
 
-[Unreleased]:      https://github.com/ChrisRega/codegraph/compare/v0.2.0-alpha.2...HEAD
+[Unreleased]:      https://github.com/ChrisRega/codegraph/compare/v0.2.0-alpha.3...HEAD
+[0.2.0-alpha.3]:   https://github.com/ChrisRega/codegraph/compare/v0.2.0-alpha.2...v0.2.0-alpha.3
 [0.2.0-alpha.2]:   https://github.com/ChrisRega/codegraph/compare/v0.2.0-alpha.1...v0.2.0-alpha.2
 [0.2.0-alpha.1]:   https://github.com/ChrisRega/codegraph/compare/v0.1.0...v0.2.0-alpha.1

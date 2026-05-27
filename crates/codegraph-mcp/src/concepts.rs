@@ -52,6 +52,21 @@ pub fn handle_define_concept(db: &Db, params: &Value) -> Value {
     if let Err(e) = db.run(&attach) {
         return err_text(format!("concept attach failed: {e}"));
     }
+    // nx-12: also emit a direct `[:RELATES_TO]` edge so queries can navigate
+    // concept → target in one hop without traversing `[:DESCRIBES]`. The
+    // edge is generic on the target side (whatever label `t` carries), so a
+    // typed query like `MATCH (c:Concept)-[:RELATES_TO]->(f:Function)` falls
+    // out naturally on the consumer end. `[:DESCRIBES]` is kept for backward
+    // compatibility with existing saved views / dossiers.
+    let attach_relates = format!(
+        "{match_clause} \
+         MATCH (c:Concept {{name: {n}}}) \
+         MERGE (c)-[:RELATES_TO]->(t)",
+        n = escape_str(&name),
+    );
+    if let Err(e) = db.run(&attach_relates) {
+        eprintln!("[concept] :RELATES_TO mirror failed (non-fatal): {e}");
+    }
     let count_q = format!(
         "MATCH (:Concept {{name: {n}}})-[:DESCRIBES]->(t) RETURN count(t) AS c",
         n = escape_str(&name),

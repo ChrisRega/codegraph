@@ -41,6 +41,7 @@ fn tool_list_advertises_expected_tools() {
         "graph_export",
         "dead_code",
         "arch_overlay",
+        "import_pr",
         "index_status",
         "import_pr_notes",
         "watch",
@@ -400,6 +401,44 @@ fn coverage_md_excludes_test_functions_from_orphans() {
     assert!(
         !md.contains("m::it_works"),
         "test fn should be excluded from orphans/untested:\n{md}"
+    );
+}
+
+#[test]
+fn coverage_md_by_package_rolls_up_per_internal_package() {
+    let db = Db::open_in_memory().unwrap();
+    db.run("CREATE (:Package {name:'core', path:'crates/core', is_external:false})")
+        .unwrap();
+    db.run("CREATE (:Package {name:'mcp',  path:'crates/mcp',  is_external:false})")
+        .unwrap();
+    db.run("CREATE (:Package {name:'rand', path:'',            is_external:true})")
+        .unwrap();
+    db.run("CREATE (:File {path:'crates/core/src/lib.rs'})")
+        .unwrap();
+    db.run("CREATE (:File {path:'crates/mcp/src/main.rs'})")
+        .unwrap();
+    db.run("CREATE (:Function {qualified_name:'core::alive', name:'alive'})")
+        .unwrap();
+    db.run("CREATE (:Function {qualified_name:'core::dead',  name:'dead'})")
+        .unwrap();
+    db.run("CREATE (:Function {qualified_name:'mcp::handler', name:'handler'})")
+        .unwrap();
+    db.run("MATCH (f:Function {qualified_name:'core::alive'}),(file:File {path:'crates/core/src/lib.rs'}) MERGE (f)-[:DEFINED_IN]->(file)").unwrap();
+    db.run("MATCH (f:Function {qualified_name:'core::dead'}),(file:File {path:'crates/core/src/lib.rs'}) MERGE (f)-[:DEFINED_IN]->(file)").unwrap();
+    db.run("MATCH (f:Function {qualified_name:'mcp::handler'}),(file:File {path:'crates/mcp/src/main.rs'}) MERGE (f)-[:DEFINED_IN]->(file)").unwrap();
+    db.run("MATCH (a:Function {qualified_name:'mcp::handler'}),(b:Function {qualified_name:'core::alive'}) MERGE (a)-[:CALLS]->(b)").unwrap();
+
+    let md = text_of(&handle_coverage_md(&db, &json!({"by_package": true})));
+    assert!(md.contains("by package"), "header missing: {md}");
+    assert!(md.contains("`core`"), "core missing: {md}");
+    assert!(md.contains("`mcp`"), "mcp missing: {md}");
+    assert!(!md.contains("`rand`"), "external package leaked: {md}");
+    // core has 2 fns: alive (called) + dead (orphan). mcp has 1 (handler) which has no caller.
+    // Both orphan_fns + untested_fns are non-zero somewhere.
+    assert!(
+        md.lines()
+            .any(|l| l.contains("`core`") && l.contains("| 2 |")),
+        "core fn count wrong: {md}"
     );
 }
 
