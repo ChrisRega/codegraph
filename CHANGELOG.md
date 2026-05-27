@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0-alpha.3] - 2026-05-27
+
+The "agent + diagnostics" alpha — adds the agent-driven `:ArchModule`
+overlay (PR #3), three new MCP diagnostic tools (`graph_export`,
+`dead_code`, `arch_overlay`), the `:PR`-as-graph-node import path,
+and a fix for the live-mode CALL-extraction asymmetry that made
+freshly-shipped code look dead. Two velr bugs we'd worked around
+were fixed upstream in the meantime (0.2.16 → 0.2.17).
+
 ### Fixed
 
 - **Live-mode CALL extraction (nx-16).** When a fresh function landed
@@ -336,6 +345,7 @@ RETURN w.kind, w.title, w.current_status_at ORDER BY w.kind, w.title
   and `type()`) may change. The indexer / MCP server pin the entire
   feature set against velr 0.2.9 for now.
 
-[Unreleased]:      https://github.com/ChrisRega/codegraph/compare/v0.2.0-alpha.2...HEAD
+[Unreleased]:      https://github.com/ChrisRega/codegraph/compare/v0.2.0-alpha.3...HEAD
+[0.2.0-alpha.3]:   https://github.com/ChrisRega/codegraph/compare/v0.2.0-alpha.2...v0.2.0-alpha.3
 [0.2.0-alpha.2]:   https://github.com/ChrisRega/codegraph/compare/v0.2.0-alpha.1...v0.2.0-alpha.2
 [0.2.0-alpha.1]:   https://github.com/ChrisRega/codegraph/compare/v0.1.0...v0.2.0-alpha.1

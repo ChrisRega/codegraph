@@ -160,7 +160,7 @@ Sorted by frequency.
 | `cypher_md(query)` | Arbitrary openCypher, rendered as a GFM table. |
 | `explore(label, key, value, char_budget)` | Token-budgeted BFS dossier — bounded subgraph in one call. |
 | `impact(value, depth, top)` | Transitive blast radius of a `:Function`: callers + callees + doc mentions + BDD scenarios. |
-| `coverage_md(limit)` | Dim-spots report — orphan functions, untested functions ranked by fan-in, files with no notes. |
+| `coverage_md(limit, by_package?)` | Dim-spots report — orphan functions, untested functions ranked by fan-in, files with no notes. Pass `by_package=true` for a one-row-per-`:Package` rollup table sorted by `orphan + untested` desc. |
 | `dead_code(name_skip?, ignore_test_callers?, ...)` | `:Function`s with no incoming `:CALLS`. Hint generator, not a verdict: filters for tests, entry-point name prefixes, and test-only callers. |
 | `graph_export(label, key, value, depth?, format?)` | Node-centered subgraph rendered as Mermaid (default) or Graphviz DOT — fenced block ready to drop into a PR or chat. |
 | `arch_overlay(workspace_name?)` | Subprocesses `claude -p` to derive an `:ArchModule` overlay on the live DB (3–7 modules with semantic kinds, descriptions, layer hints, and `[:USES]` edges). Pair with `graph_export(label="ArchModule", …)`. |
@@ -178,6 +178,7 @@ Sorted by frequency.
 | `save_view(name, cypher)` / `view(name, params)` / `list_views` | Parameterised reusable Cypher, stored as `:View` nodes. |
 | `watch(label, key, value)` / `unwatch` / `list_watches` | Cross-session "tell me if this function changes." Next indexer pass attaches a `watch-trigger` note. |
 | `import_pr_notes(comments, pr)` | Turn `gh pr view --json comments` output into `:Note`s on referenced functions. |
+| `import_pr(json)` | Take a `gh pr view --json …` payload and write a `:PR` node + `[:AUTHORED]` / `[:MERGES_INTO]` / `[:REFERENCES]→:WorklogItem` edges. Idempotent on `number`. |
 
 ### Worklog (project log in the graph)
 
