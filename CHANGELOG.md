@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **velr bumped 0.2.16 → 0.2.17.** Two bugs we'd worked around are
+  fixed upstream: unanchored `MATCH ()-[r:R]->() DELETE r` now drains
+  in one pass (see `docs/velr-bugs/0001-…md`), and `MERGE` on a
+  relationship is idempotent again (`MERGE (a)-[:X]->(b)` no longer
+  stacks duplicate edges across runs). The defensive `DISTINCT` in
+  `arch.rs` stays for regression safety. All `cargo test` green
+  against 0.2.17.
+
 ### Added
 
 - **`dead_code` MCP tool (nx-06).** Lists `:Function` nodes with no

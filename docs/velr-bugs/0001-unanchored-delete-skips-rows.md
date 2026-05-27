@@ -1,10 +1,18 @@
 # velr bug report — `MATCH ... DELETE r` with unanchored endpoints silently skips rows
 
-**velr version:** 0.2.16
+> **Status: fixed upstream in velr 0.2.17 (2026-05-27).** Verified by
+> re-running the reproducer below: the unanchored `MATCH ()-[r:R]->()
+> DELETE r` now drains all three edges in a single pass. The companion
+> `MERGE`-on-relationship-doesn't-dedupe bug (an internal find we
+> filed as nx-19) is also fixed. The report below is kept for
+> historical reference — it was prepared while we were still on
+> 0.2.16 and never made it to upstream.
+
+**velr version:** 0.2.16 (fixed in 0.2.17)
 **driver:** `velr` crate (Rust) 0.2.16, default features
 **OS:** Linux 7.0.7-arch1-1, x86_64
 **rustc:** 1.95.0 (59807616e 2026-04-14)
-**date:** 2026-05-19
+**date:** 2026-05-19  ·  **resolved:** 2026-05-27
 
 ## Summary
 
