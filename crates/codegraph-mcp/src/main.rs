@@ -46,6 +46,7 @@ mod graph_export;
 mod history;
 mod impact;
 mod notes;
+mod pr_nodes;
 mod pr_notes;
 mod render;
 mod report;
@@ -66,6 +67,7 @@ use graph_export::handle_graph_export;
 use history::handle_history;
 use impact::handle_impact;
 use notes::{handle_list_notes, handle_write_note};
+use pr_nodes::handle_import_pr;
 use pr_notes::handle_import_pr_notes;
 use render::{format_table, format_table_md, render_neighbours, render_notes_rows};
 use tx::{handle_begin, handle_commit, handle_rollback, handle_write, TxState};
@@ -257,6 +259,17 @@ fn tool_list() -> Value {
                 "inputSchema": { "type": "object", "properties": {} }
             },
             {
+                "name": "import_pr",
+                "description": "Add a `:PR` node from one `gh pr view --json …` payload (or a hand-crafted equivalent). Writes the PR's metadata (number, title, state, body, head_sha, merge_commit_sha, merged_at, author), then materialises `[:AUTHORED]` from the matching `:Author`, `[:MERGES_INTO]` from the PR to its `:GitCommit` (when the sha is in the graph), and `[:REFERENCES]` to every `:WorklogItem` mentioned in title or body via an id-shape pattern (`nx-09`, `abc-42`, etc.). Idempotent on `number`. Pair with `import_pr_notes` to also capture review comments as `:Note`s.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "json": { "type": "string", "description": "JSON string with the PR payload — minimum {number, title, state, body}." }
+                    },
+                    "required": ["json"]
+                }
+            },
+            {
                 "name": "import_pr_notes",
                 "description": "Import a list of PR / code-review comments as `:Note` nodes attached to any `:Function` they reference. Backticked tokens in each `body` are looked up against `Function.name` and `Function.qualified_name`; matching targets all get the same note attached. Suggested workflow: feed the output of `gh pr view <n> --json comments` into the `comments` argument.",
                 "inputSchema": {
@@ -303,11 +316,12 @@ fn tool_list() -> Value {
             },
             {
                 "name": "coverage_md",
-                "description": "Surface the dim spots of the graph as a single Markdown report — useful for onboarding (\"where to start reading\") and refactor risk (\"what's load-bearing but undocumented\"). Sections: functions with no inbound `[:CALLS]` (orphans), non-test functions with no inbound `[:TESTS]`, files with no `:Note`s, and packages whose files have zero doc-mentions. Each row in the untested-functions section is ranked by total `[:CALLS]` fan-in so the highest-impact gaps surface first.",
+                "description": "Surface the dim spots of the graph as a single Markdown report — useful for onboarding (\"where to start reading\") and refactor risk (\"what's load-bearing but undocumented\"). Sections: functions with no inbound `[:CALLS]` (orphans), non-test functions with no inbound `[:TESTS]`, files with no `:Note`s, and packages whose files have zero doc-mentions. Each row in the untested-functions section is ranked by total `[:CALLS]` fan-in so the highest-impact gaps surface first. Pass `by_package: true` to swap the long form for a one-row-per-`:Package` rollup (fns / orphan / untested / files / no_note / doc_mentions), sorted by `orphan_fns + untested_fns` desc so the package most in need of attention comes first.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "limit": { "type": "integer", "description": "Max rows per category (default 15)." }
+                        "limit":      { "type": "integer", "description": "Max rows per category (default 15)." },
+                        "by_package": { "type": "boolean", "description": "Switch to a per-`:Package` rollup table (default false)." }
                     }
                 }
             },
@@ -930,6 +944,7 @@ fn main() {
                         handle_index_status(&status, watch_path.as_deref(), &tx, &db_path)
                     }
                     "import_pr_notes" => handle_import_pr_notes(&db, params),
+                    "import_pr" => handle_import_pr(&db, params),
                     "watch" => handle_watch(&db, params),
                     "unwatch" => handle_unwatch(&db, params),
                     "list_watches" => handle_list_watches(&db),

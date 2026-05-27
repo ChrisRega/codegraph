@@ -49,6 +49,13 @@ pub fn handle_coverage_md(db: &Db, params: &Value) -> Value {
         .and_then(|v| v.as_i64())
         .unwrap_or(15)
         .max(1) as usize;
+    if params
+        .get("by_package")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return render_by_package(db, limit);
+    }
 
     let mut out = String::new();
     out.push_str("# Graph coverage report\n\n");
@@ -192,5 +199,197 @@ pub fn handle_coverage_md(db: &Db, params: &Value) -> Value {
         }
     }
 
+    ok_text(out.trim_end().to_string())
+}
+
+/// `coverage_md --by-package` (nx-7) — rollup of the same dim-spot
+/// signals but aggregated to one row per internal `:Package`.
+/// Assignment of `:Function`/`:File` to a package is by longest
+/// matching `file.path` prefix against `package.path`, same heuristic
+/// as `arch.rs`. Returns a sortable Markdown table — top of the list
+/// = the package most in need of attention.
+fn render_by_package(db: &Db, _limit: usize) -> Value {
+    // Fetch internal packages with their source paths.
+    let pkgs: Vec<(String, String)> = {
+        let mut v: Vec<(String, String)> = Vec::new();
+        if let Ok(t) = db.query(
+            "MATCH (p:Package) WHERE p.is_external = false RETURN p.name AS name, p.path AS path",
+        ) {
+            for row in &t.rows {
+                let n = row.first().and_then(|c| c.as_str()).unwrap_or("");
+                let p = row.get(1).and_then(|c| c.as_str()).unwrap_or("");
+                if !n.is_empty() && !p.is_empty() {
+                    v.push((n.to_string(), p.to_string()));
+                }
+            }
+        }
+        v
+    };
+    if pkgs.is_empty() {
+        return ok_text(
+            "# Graph coverage report — by package\n\n_(no internal packages found)_".to_string(),
+        );
+    }
+    // Sort by descending path length so longest-prefix match wins on
+    // nested workspaces.
+    let mut sorted = pkgs.clone();
+    sorted.sort_by_key(|(_, p)| std::cmp::Reverse(p.len()));
+    let assign = |path: &str| -> Option<&str> {
+        sorted
+            .iter()
+            .find(|(_, p)| path.starts_with(p))
+            .map(|(n, _)| n.as_str())
+    };
+
+    // Per-package counters.
+    use std::collections::HashMap;
+    struct Stats {
+        total_fns: u32,
+        orphan_fns: u32,
+        untested_fns: u32,
+        files: u32,
+        files_no_notes: u32,
+        doc_mentions: u32,
+    }
+    let mut stats: HashMap<String, Stats> = pkgs
+        .iter()
+        .map(|(n, _)| {
+            (
+                n.clone(),
+                Stats {
+                    total_fns: 0,
+                    orphan_fns: 0,
+                    untested_fns: 0,
+                    files: 0,
+                    files_no_notes: 0,
+                    doc_mentions: 0,
+                },
+            )
+        })
+        .collect();
+
+    // Functions + their inbound CALLS/TESTS via two helper sets.
+    let test_qns: std::collections::HashSet<String> =
+        collect_strings(db, "MATCH (t:Test) RETURN t.qualified_name AS qn", 0)
+            .into_iter()
+            .collect();
+    let tested_qns: std::collections::HashSet<String> = collect_strings(
+        db,
+        "MATCH (t:Test)-[:TESTS]->(f:Function) RETURN DISTINCT f.qualified_name AS qn",
+        0,
+    )
+    .into_iter()
+    .collect();
+    let called_qns: std::collections::HashSet<String> = collect_strings(
+        db,
+        "MATCH (:Function)-[:CALLS]->(callee:Function) RETURN DISTINCT callee.qualified_name AS qn",
+        0,
+    )
+    .into_iter()
+    .collect();
+
+    let fn_rows = match db.query(
+        "MATCH (f:Function)-[:DEFINED_IN]->(file:File) \
+         RETURN DISTINCT f.qualified_name AS qn, file.path AS path",
+    ) {
+        Ok(t) => t,
+        Err(e) => return crate::util::err_text(format!("by-package fn fetch failed: {e}")),
+    };
+    for row in &fn_rows.rows {
+        let qn = row.first().and_then(|c| c.as_str()).unwrap_or("");
+        let path = row.get(1).and_then(|c| c.as_str()).unwrap_or("");
+        let Some(pkg) = assign(path) else { continue };
+        let Some(s) = stats.get_mut(pkg) else {
+            continue;
+        };
+        if test_qns.contains(qn) {
+            // Test functions are intentionally entry points — don't
+            // count them as orphans, but do count them in the total.
+            s.total_fns += 1;
+            continue;
+        }
+        s.total_fns += 1;
+        if !called_qns.contains(qn) {
+            s.orphan_fns += 1;
+        }
+        if !tested_qns.contains(qn) {
+            s.untested_fns += 1;
+        }
+    }
+
+    // Files + notes.
+    let notes_per_file: std::collections::HashSet<String> = collect_strings(
+        db,
+        "MATCH (n:Note)-[:NOTES]->(f:File) RETURN DISTINCT f.path AS path",
+        0,
+    )
+    .into_iter()
+    .collect();
+    let file_rows = match db.query("MATCH (f:File) RETURN DISTINCT f.path AS path") {
+        Ok(t) => t,
+        Err(e) => return crate::util::err_text(format!("by-package file fetch failed: {e}")),
+    };
+    for row in &file_rows.rows {
+        let path = row.first().and_then(|c| c.as_str()).unwrap_or("");
+        let Some(pkg) = assign(path) else { continue };
+        let Some(s) = stats.get_mut(pkg) else {
+            continue;
+        };
+        s.files += 1;
+        if !notes_per_file.contains(path) {
+            s.files_no_notes += 1;
+        }
+    }
+
+    // Doc mentions: each :MENTIONS edge whose target Function lives in
+    // a file under a package path.
+    let mention_rows = match db.query(
+        "MATCH (:DocSection)-[:MENTIONS]->(f:Function)-[:DEFINED_IN]->(file:File) \
+         RETURN file.path AS path",
+    ) {
+        Ok(t) => t,
+        Err(_) => codegraph_core::Table {
+            columns: Vec::new(),
+            rows: Vec::new(),
+        },
+    };
+    for row in &mention_rows.rows {
+        let path = row.first().and_then(|c| c.as_str()).unwrap_or("");
+        let Some(pkg) = assign(path) else { continue };
+        let Some(s) = stats.get_mut(pkg) else {
+            continue;
+        };
+        s.doc_mentions += 1;
+    }
+
+    // Render — sort by "needs attention" first: orphan_fns + untested_fns desc.
+    let mut rows: Vec<(&str, &Stats)> = stats.iter().map(|(k, v)| (k.as_str(), v)).collect();
+    rows.sort_by(|a, b| {
+        let score_a = a.1.orphan_fns + a.1.untested_fns;
+        let score_b = b.1.orphan_fns + b.1.untested_fns;
+        score_b.cmp(&score_a).then_with(|| a.0.cmp(b.0))
+    });
+
+    let mut out = String::new();
+    out.push_str("# Graph coverage — by package\n\n");
+    out.push_str(
+        "_One row per internal `:Package`. Sorted by `orphan_fns + untested_fns` \
+         desc — top = most in need of attention. Test functions excluded from \
+         orphan/untested counters but still in `fns`._\n\n",
+    );
+    out.push_str("| package | fns | orphan | untested | files | no_note | doc_mentions |\n");
+    out.push_str("|---------|----:|-------:|---------:|------:|--------:|-------------:|\n");
+    for (name, s) in &rows {
+        out.push_str(&format!(
+            "| `{}` | {} | {} | {} | {} | {} | {} |\n",
+            name,
+            s.total_fns,
+            s.orphan_fns,
+            s.untested_fns,
+            s.files,
+            s.files_no_notes,
+            s.doc_mentions,
+        ));
+    }
     ok_text(out.trim_end().to_string())
 }

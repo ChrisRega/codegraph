@@ -27,7 +27,7 @@ Sorted by frequency you should reach for them in a typical session.
 | `cypher(query)` | Same but TSV — only use when you need to post-process. |
 | `explore(label, key, value, char_budget, max_depth)` | Token-budgeted BFS. Replaces the multi-`node_md`-call pattern when you want a bounded subgraph dossier. Footer reports drops so you know whether to raise the budget. |
 | `impact(value, depth, top)` | Transitive blast radius for a `:Function`: callers + callees (BFS over `[:CALLS]`) plus doc mentions and BDD scenarios. Use before any refactor. |
-| `coverage_md(limit)` | The "dim spots" report — orphan functions, untested functions ranked by fan-in, files with no notes, packages with zero doc mentions. Onboarding hot list. |
+| `coverage_md(limit, by_package?)` | The "dim spots" report — orphan functions, untested functions ranked by fan-in, files with no notes, packages with zero doc mentions. Pass `by_package=true` for a one-row-per-`:Package` rollup table (fns / orphan / untested / files / no_note / doc_mentions), sorted by `orphan+untested` desc. Onboarding hot list. |
 | `dead_code(exclude_tests?, ignore_test_callers?, kind?, name_skip?, limit?)` | `:Function`s with no incoming `:CALLS` — graph-derived suspicious functions. Hint generator, not a verdict: `main`, public API, FFI, string-matched dispatch and trait impls look dead because the caller side isn't in the AST. Defaults exclude `:Test` candidates and count test-only callers as life; flip `ignore_test_callers=true` for a "covered-only-by-tests" sweep. `name_skip` filters obvious entry-point prefixes (`main`, `handle_`, `phase_`). |
 | `graph_export(label, key, value, depth?, format?, max_nodes?)` | Node-centered subgraph as Mermaid `flowchart LR` (default) or Graphviz DOT. BFS from seed, clamped depth 1–3, capped at 200 nodes. Output is fenced so it round-trips into GitHub / chats / `:Note` bodies. Neighbour identity uses coalesce(qualified_name, id, path, name, hash). At depth > 1, only nodes with the seed's label/key continue the BFS. |
 | `arch_overlay(workspace_name?)` | Subprocesses `claude -p` to derive an `:ArchModule` overlay on the live DB: gathers `:Package` + hot `:Function`s + cross-package `:CALLS` density, asks the agent for a 3–7-module coarse architecture, writes back `:ArchModule` + `[:CONTAINS]`→`:Package` + `[:GROUPS]`→`:Function` + `[:USES]` edges with `semantic_kind`/`description`/`layer_hint`. In-session counterpart to `codegraph-indexer --full --with-arch-agent`. Real cost: one API call + a few seconds. Failures degrade silently — check stderr. Use this when the user wants a fresh "what does this repo decompose into" view, then visualise with `graph_export(label="ArchModule", …)`. |
@@ -46,6 +46,7 @@ Sorted by frequency you should reach for them in a typical session.
 | `save_view(name, cypher, description?)` / `view(name, params?)` / `list_views` | Persist + replay parameterised Cypher queries as `:View` nodes. Use for queries you find yourself running repeatedly. `$key` tokens in the saved cypher get substituted via `escape_str` at run time. |
 | `watch(label, key, value)` / `unwatch` / `list_watches` | Mark a node so the next indexer pass attaches a `:Note` tagged `watch-trigger` when its body changes. Cross-session async notifications. |
 | `import_pr_notes(comments, pr?)` | Bulk-import `gh pr view --json comments` output as `:Note`s on referenced `:Function`s. |
+| `import_pr(json)` | Take a `gh pr view --json …` payload and MERGE a `:PR{number,title,state,body,head_sha,merge_commit_sha,merged_at,author}` node. Materialises `[:AUTHORED]` from the `:Author`, `[:MERGES_INTO]` to a `:GitCommit` when the sha is in the graph, and `[:REFERENCES]` to every `:WorklogItem` mentioned in title or body (permissive `nx-XX`-style matcher). Idempotent on `number`. Pair with `import_pr_notes` for review comments. |
 | `worklog_create(title, area?, kind?, status?, comment?, author?, id?, match?)` | Create a `:WorklogItem` with an initial `:Status` (default `pending`). `kind` classifies the work: `bug` \| `feature` \| `task` \| `refactor` \| `perf` \| `docs` (default `task`) — mirrors Conventional-Commits prefixes. Optional first `:Comment` and `[:RELATES_TO]` edges (Cypher MATCH binding `t`). Use this when starting any non-trivial work the user wants tracked across sessions. |
 | `worklog_set_status(id, status, comment?, author?)` | Append a new `:Status` to an existing item (status is append-only — never destructive). Allowed: `pending`, `in_progress`, `done`, `blocked`, `abandoned`. Attach a comment that summarises why the transition happened. |
 | `worklog_comment(id, body, author?)` | Attach a `:Comment` to the **latest** `:Status` of an item. Use this for thoughts that arrive AFTER the transition — retros, follow-up findings, lessons learned. |
@@ -69,9 +70,10 @@ Labels that appear depending on what's been written:
 - **Revision history (accumulate across `--full`):** `:GitCommit`,
   `:Author`
 - **Conditional on user/tool activity:** `:Note` (from `write_note` /
-  `import_pr_notes`), `:View` (from `save_view`), `:Concept` (from
-  `define_concept`), `:Watch` (from `watch`), `:WorklogItem` /
-  `:Status` / `:Comment` (from the `worklog_*` tools)
+  `import_pr_notes`), `:PR` (from `import_pr`), `:View` (from
+  `save_view`), `:Concept` (from `define_concept`), `:Watch` (from
+  `watch`), `:WorklogItem` / `:Status` / `:Comment` (from the
+  `worklog_*` tools)
 - **Derived during Phase 6:** `:Test` (added to `:Function`s whose body
   contains `#[test]` / `#[tokio::test]`)
 - **Optional agent overlay (Phase 5b):** `:ArchModule` from

@@ -253,6 +253,57 @@ pub fn index_files_via_lsp(
         }
     }
 
+    // ── Incoming-calls pass (nx-16) ──────────────────────────────────────────
+    //
+    // The outgoing pass above only rebuilds CALLS *from* functions in this
+    // batch. If a fresh function lands in file A and the caller in file B is
+    // not in the same batch (typical when one file is saved much more often
+    // than the other, or when the body_hash of B hasn't changed), the
+    // incoming edges to A's new functions never get materialised. The DB ends
+    // up showing newly-shipped code as "dead" until the next --full reindex.
+    //
+    // Counter that asymmetry by asking the LSP for incomingCalls on every
+    // function in this batch and MERGE-ing the missing caller -> callee
+    // edges. The (b:Function {name: ...}) lookup uses unqualified name, same
+    // ambiguity ceiling as the outgoing pass — good enough for the symptom,
+    // not perfect.
+    if !fn_positions.is_empty() {
+        let positions: Vec<(PathBuf, u32, u32)> = fn_positions
+            .iter()
+            .map(|(abs, line, character, _, _)| (abs.clone(), *line, *character))
+            .collect();
+        eprintln!(
+            "  [*] Pipelining incomingCalls for {} fn(s) (caller-side bridge for fresh code)",
+            positions.len()
+        );
+        let batched = lsp.incoming_calls_batch(&positions);
+        let mut incoming_added = 0u32;
+        for ((_, _, _, callee_qn, _), calls) in fn_positions.iter().zip(batched) {
+            let mut seen: HashSet<String> = HashSet::new();
+            for call in &calls {
+                let caller_name = &call.from.name;
+                if !seen.insert(caller_name.clone()) {
+                    continue;
+                }
+                // MERGE so we don't double-count when the caller's outgoing
+                // pass already produced this edge in the same batch.
+                run(
+                    db,
+                    &format!(
+                        "MATCH (a:Function {{name: {caller}}}), (b:Function {{qualified_name: {callee}}}) MERGE (a)-[:CALLS]->(b)",
+                        caller = escape_str(caller_name),
+                        callee = escape_str(callee_qn),
+                    ),
+                );
+                incoming_added += 1;
+            }
+        }
+        if incoming_added > 0 {
+            eprintln!("  [+] Incoming-CALLS pass added {incoming_added} caller-side edges");
+        }
+        total_calls += incoming_added;
+    }
+
     (total_symbols, total_functions, total_calls)
 }
 

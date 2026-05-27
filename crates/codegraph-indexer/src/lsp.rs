@@ -435,6 +435,101 @@ impl LspClient {
             .collect()
     }
 
+    /// Batched `incomingCalls`: mirror of [`outgoing_calls_batch`] for
+    /// the reverse direction. Used by the live indexer to repair the
+    /// caller-side of the CALLS graph when a fresh function appears in
+    /// a file that gets reparsed in isolation (the file that *calls*
+    /// it may not be in the same batch, so its outgoing pass never
+    /// runs — incomingCalls bridges that).
+    pub fn incoming_calls_batch(
+        &mut self,
+        positions: &[(std::path::PathBuf, u32, u32)],
+    ) -> Vec<Vec<CallHierarchyIncomingCall>> {
+        const MAX_INFLIGHT: usize = 32;
+        let mut out: Vec<Vec<CallHierarchyIncomingCall>> = Vec::with_capacity(positions.len());
+        for chunk in positions.chunks(MAX_INFLIGHT) {
+            out.extend(self.incoming_calls_chunk(chunk));
+        }
+        out
+    }
+
+    fn incoming_calls_chunk(
+        &mut self,
+        positions: &[(std::path::PathBuf, u32, u32)],
+    ) -> Vec<Vec<CallHierarchyIncomingCall>> {
+        if positions.is_empty() {
+            return Vec::new();
+        }
+        let mut prep_ids: Vec<Option<i64>> = Vec::with_capacity(positions.len());
+        for (path, line, character) in positions {
+            let uri = match file_uri(path) {
+                Ok(u) => u,
+                Err(_) => {
+                    prep_ids.push(None);
+                    continue;
+                }
+            };
+            let id = self.send_request(
+                "textDocument/prepareCallHierarchy",
+                CallHierarchyPrepareParams {
+                    text_document_position_params: TextDocumentPositionParams {
+                        text_document: TextDocumentIdentifier { uri },
+                        position: Position {
+                            line: *line,
+                            character: *character,
+                        },
+                    },
+                    work_done_progress_params: Default::default(),
+                },
+            );
+            prep_ids.push(id.ok());
+        }
+        let mut call_ids: Vec<Option<i64>> = Vec::with_capacity(positions.len());
+        for prep_id in prep_ids {
+            let Some(id) = prep_id else {
+                call_ids.push(None);
+                continue;
+            };
+            let items: Option<Vec<CallHierarchyItem>> =
+                match self.await_response(id, "textDocument/prepareCallHierarchy") {
+                    Ok(v) => v,
+                    Err(_) => {
+                        call_ids.push(None);
+                        continue;
+                    }
+                };
+            let item = match items.and_then(|v| v.into_iter().next()) {
+                Some(it) => it,
+                None => {
+                    call_ids.push(None);
+                    continue;
+                }
+            };
+            let id = self.send_request(
+                "callHierarchy/incomingCalls",
+                CallHierarchyIncomingCallsParams {
+                    item,
+                    work_done_progress_params: Default::default(),
+                    partial_result_params: Default::default(),
+                },
+            );
+            call_ids.push(id.ok());
+        }
+        call_ids
+            .into_iter()
+            .map(|id| match id {
+                Some(id) => match self.await_response::<Option<Vec<CallHierarchyIncomingCall>>>(
+                    id,
+                    "callHierarchy/incomingCalls",
+                ) {
+                    Ok(Some(v)) => v,
+                    _ => Vec::new(),
+                },
+                None => Vec::new(),
+            })
+            .collect()
+    }
+
     /// Get outgoing calls from a function at a specific position.
     pub fn outgoing_calls(
         &mut self,
