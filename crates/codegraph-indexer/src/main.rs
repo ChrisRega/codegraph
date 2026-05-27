@@ -16,6 +16,10 @@ OPTIONS:
     --db        <path>   velr database file to write to (default: code-graph.db)
     --lsp       <bin>    Override the language-server binary
     --full               Force a full re-index (ignore the sidecar metadata)
+    --with-arch-agent    During --full, run `claude -p` to derive an
+                         :ArchModule overlay on top of the static graph
+                         (semantic groupings + descriptions). Requires
+                         the `claude` CLI in PATH. Off by default.
     -h, --help           Show this help and exit
     -V, --version        Print version and exit
 
@@ -37,6 +41,7 @@ fn main() -> ExitCode {
     let workspace = flag(&args, "--workspace").unwrap_or_else(|| ".".to_string());
     let db_path = flag(&args, "--db").unwrap_or_else(|| "code-graph.db".to_string());
     let force_full = args.iter().any(|a| a == "--full");
+    let with_arch_agent = args.iter().any(|a| a == "--with-arch-agent");
     let lsp_cmd_override = flag(&args, "--lsp");
 
     let opts = IndexOptions {
@@ -44,6 +49,7 @@ fn main() -> ExitCode {
         db_path,
         lsp_cmd_override,
         force_full,
+        with_arch_agent,
         path_set: None,
     };
 

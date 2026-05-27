@@ -8,7 +8,45 @@
 
 use serde_json::Value;
 
+use crate::tx::TxState;
 use crate::util::{chrono_now_iso, ok_text};
+
+/// Format a byte count with a binary-suffix unit (KiB, MiB, GiB) so the
+/// `index_status` lines stay readable when the DB has grown past trivial
+/// sizes. Sub-KiB stays in bytes so the unit is never misleading.
+fn fmt_bytes(n: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * KIB;
+    const GIB: u64 = 1024 * MIB;
+    if n >= GIB {
+        format!("{:.2} GiB", n as f64 / GIB as f64)
+    } else if n >= MIB {
+        format!("{:.1} MiB", n as f64 / MIB as f64)
+    } else if n >= KIB {
+        format!("{:.1} KiB", n as f64 / KIB as f64)
+    } else {
+        format!("{n} B")
+    }
+}
+
+/// Read the file sizes of the velr DB plus its WAL / SHM sidecars. Missing
+/// files report as 0 — they may not exist yet for a fresh DB, or may be
+/// rolled away after a checkpoint. Returns `(db, wal, shm)` in bytes.
+fn db_file_sizes(db_path: &str) -> (u64, u64, u64) {
+    let len_of = |p: &str| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+    let db = len_of(db_path);
+    let wal = len_of(&format!("{db_path}-wal"));
+    let shm = len_of(&format!("{db_path}-shm"));
+    (db, wal, shm)
+}
+
+/// WAL size at which we flag the DB section with a WARNING marker.
+/// The 20 GB eskalations we hit are nowhere near this — the warning is
+/// meant to fire while the bug is still recoverable, not after.
+const WAL_WARN_BYTES: u64 = 100 * 1024 * 1024;
+/// Buffered-tx age at which we flag the transaction as probably leaked.
+/// 30 s is comfortably above any honest agent workflow.
+const TX_WARN_SECS: u64 = 30;
 
 // ── Path filter ──────────────────────────────────────────────────────────────
 
@@ -120,13 +158,56 @@ pub fn new_shared_status() -> SharedStatus {
 /// Render the live indexer status as Markdown. Safe to call whether or
 /// not `--watch` was supplied: without a watcher, returns a stub making
 /// the no-op explicit so an LLM doesn't poll forever.
-pub fn handle_index_status(status: &SharedStatus, watch_path: Option<&str>) -> Value {
+pub fn handle_index_status(
+    status: &SharedStatus,
+    watch_path: Option<&str>,
+    tx: &TxState,
+    db_path: &str,
+) -> Value {
     let snap = match status.lock() {
         Ok(g) => g.clone(),
         Err(p) => p.into_inner().clone(),
     };
     let mut out = String::new();
     out.push_str("# Indexer status\n\n");
+
+    // DB / WAL section always shown, even without --watch — the bloat
+    // bug is independent of the watcher and the size telemetry is what
+    // turns "DB is huge" from a vague feeling into a number.
+    let (db_size, wal_size, shm_size) = db_file_sizes(db_path);
+    let wal_warn = wal_size > WAL_WARN_BYTES;
+    out.push_str("## Database files\n\n");
+    out.push_str(&format!("- **DB:** `{db_path}` ({})\n", fmt_bytes(db_size)));
+    out.push_str(&format!(
+        "- **WAL:** {}{}\n",
+        fmt_bytes(wal_size),
+        if wal_warn {
+            "  ⚠ over 100 MiB — possible long-open transaction or missing checkpoint"
+        } else {
+            ""
+        }
+    ));
+    out.push_str(&format!("- **SHM:** {}\n", fmt_bytes(shm_size)));
+    if let Some(info) = tx.info() {
+        let warn = if info.age_secs >= TX_WARN_SECS {
+            "  ⚠ likely leaked — call `commit` or `rollback`"
+        } else {
+            ""
+        };
+        let msg = info
+            .message
+            .as_deref()
+            .map(|m| format!(" — message: `{m}`"))
+            .unwrap_or_default();
+        out.push_str(&format!(
+            "- **Open buffered tx:** tx#{}, {}s old, {} queries pending{msg}{warn}\n",
+            info.tx_id, info.age_secs, info.pending
+        ));
+    } else {
+        out.push_str("- **Open buffered tx:** none\n");
+    }
+    out.push('\n');
+
     match watch_path {
         None => {
             out.push_str("_Live indexer is **not running** — start the MCP server with `--watch <workspace>` to enable._\n");

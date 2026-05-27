@@ -77,7 +77,9 @@ cargo build --workspace --release
 Subsequent indexer runs are incremental: a sidecar
 `./codegraph.db.codegraph-meta.json` tracks the last-indexed git commit
 and `git diff` selects which files to re-parse. Pass `--full` to force
-a clean rebuild.
+a clean rebuild. Add `--with-arch-agent` on a full rebuild to spawn
+`claude -p` and derive the `:ArchModule` overlay in the same pass
+(equivalent to calling `arch_overlay` from the MCP session).
 
 ### Wire it into Claude
 
@@ -159,9 +161,12 @@ Sorted by frequency.
 | `explore(label, key, value, char_budget)` | Token-budgeted BFS dossier — bounded subgraph in one call. |
 | `impact(value, depth, top)` | Transitive blast radius of a `:Function`: callers + callees + doc mentions + BDD scenarios. |
 | `coverage_md(limit)` | Dim-spots report — orphan functions, untested functions ranked by fan-in, files with no notes. |
+| `dead_code(name_skip?, ignore_test_callers?, ...)` | `:Function`s with no incoming `:CALLS`. Hint generator, not a verdict: filters for tests, entry-point name prefixes, and test-only callers. |
+| `graph_export(label, key, value, depth?, format?)` | Node-centered subgraph rendered as Mermaid (default) or Graphviz DOT — fenced block ready to drop into a PR or chat. |
+| `arch_overlay(workspace_name?)` | Subprocesses `claude -p` to derive an `:ArchModule` overlay on the live DB (3–7 modules with semantic kinds, descriptions, layer hints, and `[:USES]` edges). Pair with `graph_export(label="ArchModule", …)`. |
 | `diff_since(commit)` | What landed between a baseline `:GitCommit` and HEAD. Picks up uncommitted edits via the `:WorkingTree` overlay. |
 | `history(limit)` | `:GitCommit` snapshots, newest first. |
-| `index_status` | Live indexer state — wait for `idle` after a save before querying. |
+| `index_status` | Live indexer state — wait for `idle` after a save before querying. Also surfaces DB / WAL / open-tx sizes for spotting stuck transactions. |
 
 ### Memory (writes)
 

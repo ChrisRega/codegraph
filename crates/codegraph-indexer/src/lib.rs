@@ -36,6 +36,7 @@ use codegraph_core::{escape_str, Db, Value};
 use walkdir::WalkDir;
 
 mod api_spec;
+pub mod arch;
 mod bdd_steps;
 mod gherkin;
 pub mod lsp;
@@ -52,6 +53,11 @@ pub struct IndexOptions {
     pub db_path: String,
     pub lsp_cmd_override: Option<String>,
     pub force_full: bool,
+    /// Run the agent-driven architecture overlay (`phase_arch_agent`)
+    /// at the end of a full reindex. Requires the `claude` CLI in
+    /// `PATH`; failures degrade silently (no overlay) and log to
+    /// stderr. Has no effect in live mode.
+    pub with_arch_agent: bool,
     /// Live-indexing override: when `Some`, skip git diff and only
     /// re-process the supplied workspace-relative paths. Also skips
     /// the git-history phase and the sidecar metadata write — the
@@ -68,6 +74,7 @@ impl IndexOptions {
             db_path: db_path.into(),
             lsp_cmd_override: None,
             force_full: false,
+            with_arch_agent: false,
             path_set: None,
         }
     }
@@ -173,6 +180,7 @@ fn run_indexer_inner(opts: IndexOptions, pool: Option<&mut LspPool>) -> Result<I
         db_path,
         lsp_cmd_override,
         force_full,
+        with_arch_agent,
         path_set,
     } = opts;
     // Live mode: caller supplied an explicit path set. Skip git diff,
@@ -264,7 +272,14 @@ fn run_indexer_inner(opts: IndexOptions, pool: Option<&mut LspPool>) -> Result<I
     // annotations, and are kept across reindexes so we accumulate a real
     // timeline.
     if is_full {
-        for label in ["File", "Workspace", "Package", "APIEndpoint", "APIType"] {
+        for label in [
+            "File",
+            "Workspace",
+            "Package",
+            "APIEndpoint",
+            "APIType",
+            "ArchModule",
+        ] {
             run(&db, &format!("MATCH (n:{label}) DETACH DELETE n"));
         }
     }
@@ -563,6 +578,15 @@ fn run_indexer_inner(opts: IndexOptions, pool: Option<&mut LspPool>) -> Result<I
         );
     }
 
+    // ── Phase 5b: agent-driven architecture overlay ──────────────────────────
+    // Only on a non-live full reindex AND when the user explicitly opts in
+    // via `--with-arch-agent`. Subprocesses `claude -p` and writes back
+    // :ArchModule + edges; graceful no-op if the CLI is missing or the
+    // response can't be parsed. See crates/codegraph-indexer/src/arch.rs.
+    if is_full && with_arch_agent && !is_live {
+        arch::phase_arch_agent(&db, &ws_name);
+    }
+
     // ── Phase 6: tag tests + materialise [:TESTS] edges ──────────────────────
     phase_test_tagging(&db);
 
@@ -772,6 +796,42 @@ fn restore_preserved_notes(db: &Db, preserved: &[(String, String, String)]) -> u
     restored
 }
 
+/// Parse `Refs:` trailers out of a commit message and return the
+/// referenced worklog ids. Recognised forms (case-insensitive on the
+/// `Refs` keyword, matched only at line start so prose mentions don't
+/// false-positive):
+///
+/// ```text
+/// Refs: nx-09
+/// Refs: nx-09, nx-15
+/// refs: nx-09 nx-15
+/// ```
+///
+/// Ids are restricted to `[A-Za-z0-9_-]+` so we don't accidentally
+/// pick up adjacent punctuation. Empty input yields an empty Vec.
+fn extract_worklog_refs(message: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in message.lines() {
+        let trimmed = line.trim_start();
+        let lower = trimmed.to_ascii_lowercase();
+        let Some(rest) = lower.strip_prefix("refs:") else {
+            continue;
+        };
+        // Use the case-preserving slice for the actual id text.
+        let rest_idx = trimmed.len() - rest.len();
+        let payload = &trimmed[rest_idx..];
+        for tok in payload.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-')) {
+            if tok.is_empty() {
+                continue;
+            }
+            if !out.iter().any(|x| x == tok) {
+                out.push(tok.to_string());
+            }
+        }
+    }
+    out
+}
+
 fn phase_history(
     db: &Db,
     workspace: &Path,
@@ -831,6 +891,20 @@ fn phase_history(
                      MERGE (p)-[:PARENT_OF]->(c)",
                     escape_str(parent),
                     escape_str(&c.hash),
+                ),
+            );
+        }
+        // Auto-link to :WorklogItem(s) referenced via a `Refs:` trailer in
+        // the commit message. The MATCH silently no-ops when the id is
+        // unknown — cross-repo or stale trailers don't pollute the graph.
+        for wl_id in extract_worklog_refs(&c.message) {
+            run(
+                db,
+                &format!(
+                    "MATCH (c:GitCommit {{hash: {}}}), (w:WorklogItem {{id: {}}}) \
+                     MERGE (c)-[:REFERENCES]->(w)",
+                    escape_str(&c.hash),
+                    escape_str(&wl_id),
                 ),
             );
         }
@@ -2177,6 +2251,35 @@ fn phase_watch_triggers(db: &Db, head_hash: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extract_worklog_refs_handles_single_and_multi() {
+        assert!(extract_worklog_refs("just a normal commit").is_empty());
+        assert_eq!(
+            extract_worklog_refs("feat: do thing\n\nRefs: nx-09"),
+            vec!["nx-09"]
+        );
+        // Comma + space + mixed case
+        assert_eq!(
+            extract_worklog_refs("feat: do thing\n\nrefs: nx-09, nx-15"),
+            vec!["nx-09", "nx-15"]
+        );
+        // Whitespace separator and dedup
+        assert_eq!(
+            extract_worklog_refs("body\n\nRefs: nx-09 nx-09 nx-15"),
+            vec!["nx-09", "nx-15"]
+        );
+        // Trailing punctuation is stripped via the allowed-char split
+        assert_eq!(
+            extract_worklog_refs("body\n\nRefs: nx-09; tail"),
+            vec!["nx-09", "tail"]
+        );
+        // Mid-line "refs:" inside prose IS matched (we trim leading
+        // whitespace but otherwise require the line to start with refs:).
+        // Accepted as the cost of being permissive about indentation.
+        // A real Conventional-Commits trailer is line-start anyway.
+        assert!(extract_worklog_refs("Body text mentions refs: foo").is_empty());
+    }
 
     /// Per-test scratch directory under `std::env::temp_dir()`. Cleaned up
     /// on drop so we don't bring in a dev-dependency just for `tempfile`.

@@ -434,19 +434,66 @@ pub fn handle_worklog_list(db: &Db, params: &Value) -> Value {
     if t.rows.is_empty() {
         return ok_text("_(no worklog items)_".to_string());
     }
+
+    // Second query: per-item comment count and latest comment timestamp.
+    // Client-side aggregation — velr's COUNT/subquery surface is thin
+    // enough that one MATCH + a HashMap fold is the boring-correct path.
+    let comments_q = "MATCH (w:WorklogItem)-[:HAS_STATUS]->(:Status)-[:HAS_COMMENT]->(c:Comment) \
+                      RETURN w.id AS id, c.created_at AS at";
+    let mut comment_stats: std::collections::HashMap<String, (u32, String)> =
+        std::collections::HashMap::new();
+    match db.query(comments_q) {
+        Ok(ct) => {
+            for row in &ct.rows {
+                let id = row
+                    .first()
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let at = row
+                    .get(1)
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if id.is_empty() {
+                    continue;
+                }
+                let entry = comment_stats
+                    .entry(id)
+                    .or_insert_with(|| (0, String::new()));
+                entry.0 = entry.0.saturating_add(1);
+                // ISO-8601 strings sort lexicographically — keep the max.
+                if at > entry.1 {
+                    entry.1 = at;
+                }
+            }
+        }
+        Err(_) => {
+            // Soft-fail: degrade to no-comment columns rather than fail the list.
+        }
+    }
+
     let mut out = String::new();
     out.push_str(&format!("# Worklog ({} items)\n\n", t.rows.len()));
-    out.push_str("| status | kind | id | title | area | updated |\n");
-    out.push_str("|--------|------|----|-------|------|---------|\n");
+    out.push_str("| status | kind | id | title | area | comments | last_activity |\n");
+    out.push_str("|--------|------|----|-------|------|----------|---------------|\n");
     for row in &t.rows {
         let id = row.first().and_then(|c| c.as_str()).unwrap_or("");
         let title = row.get(1).and_then(|c| c.as_str()).unwrap_or("");
         let area = row.get(2).and_then(|c| c.as_str()).unwrap_or("");
         let kind = row.get(3).and_then(|c| c.as_str()).unwrap_or("");
         let status = row.get(4).and_then(|c| c.as_str()).unwrap_or("");
-        let at = row.get(5).and_then(|c| c.as_str()).unwrap_or("");
+        let status_at = row.get(5).and_then(|c| c.as_str()).unwrap_or("");
+        let (n_comments, max_comment_at) =
+            comment_stats.get(id).cloned().unwrap_or((0, String::new()));
+        // last_activity = max(status_at, max_comment_at). When equal, status_at wins (cheaper).
+        let last_activity: &str = if max_comment_at.as_str() > status_at {
+            &max_comment_at
+        } else {
+            status_at
+        };
         out.push_str(&format!(
-            "| `{status}` | `{kind}` | `{id}` | {title} | {area} | {at} |\n"
+            "| `{status}` | `{kind}` | `{id}` | {title} | {area} | {n_comments} | {last_activity} |\n"
         ));
     }
     ok_text(out.trim_end().to_string())
@@ -713,6 +760,30 @@ mod tests {
         assert!(bugs.contains("1 items"), "{bugs}");
         assert!(bugs.contains("a bug"), "{bugs}");
         assert!(!bugs.contains("a feat"), "{bugs}");
+    }
+
+    #[test]
+    fn list_surfaces_comment_count_and_last_activity() {
+        let db = db();
+        let r = handle_worklog_create(
+            &db,
+            &json!({"title": "A", "area": "mcp", "comment": "first"}),
+        );
+        let id = text(&r).split('`').nth(1).unwrap().to_string();
+        // Two more comments → total = 3 (one from create + two via worklog_comment).
+        handle_worklog_comment(&db, &json!({"id": id, "body": "second"}));
+        handle_worklog_comment(&db, &json!({"id": id, "body": "third"}));
+
+        let md = text(&handle_worklog_list(&db, &json!({})));
+        assert!(md.contains("comments"), "header missing: {md}");
+        assert!(md.contains("last_activity"), "header missing: {md}");
+        // The data row carries the count of 3 comments. Search for the
+        // count column value rather than the raw "3" (which collides with
+        // the items header) by including a neighbouring column boundary.
+        assert!(
+            md.lines().any(|l| l.contains("| 3 |")),
+            "row missing comment count of 3: {md}"
+        );
     }
 
     #[test]
